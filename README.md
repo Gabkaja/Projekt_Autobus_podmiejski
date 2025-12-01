@@ -11,9 +11,6 @@ Każdy element (pasażerowie, kasa, kierowca, dyspozytor) działa jako oddzielny
 
 Celem jest odwzorowanie sytuacji na dworcu, gdzie autobusy odjeżdżają cyklicznie lub na polecenie dyspozytora, a pasażerowie pojawiają się w losowych momentach.
 
-  ## Repozytorium projektu
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski
 
 ---
 
