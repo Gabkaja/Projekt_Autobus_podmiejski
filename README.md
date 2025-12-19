@@ -11,7 +11,6 @@ Każdy element (pasażerowie, kasa, kierowca, dyspozytor) działa jako oddzielny
 
 Celem jest odwzorowanie sytuacji na dworcu, gdzie autobusy odjeżdżają cyklicznie lub na polecenie dyspozytora, a pasażerowie pojawiają się w losowych momentach.
 
-
 ---
 
   
@@ -96,11 +95,10 @@ Autobus odjeżdża z niepełną liczbą pasażerów, a pozostali czekają na kol
 
 ---
 
-  
 
 ## Technologie
 
-- C / C++ – implementacja procesów i komunikacji.
+- C  – implementacja procesów i komunikacji.
 
 - Mechanizmy IPC: kolejki komunikatów, semafory, pamięć współdzielona.
 
@@ -123,21 +121,10 @@ Symulacja generuje raport zawierający:
 - czasy odjazdów i powrotów autobusów.
 
   
-
 ---
 
-  
 
-## Uruchomienie
-
-```bash
-
-# Kompilacja
-
-gcc -o autobus main.c -lpthread
-
-  
-
-# Uruchomienie
-
-./autobus
+## Jak uruchomić używając Makefile:
+Kompilacja wszystkich plików: `make` 
+Uruchomienie symulacji: `make run` 
+ Czyszczenie plików binarnych:`make clean`
