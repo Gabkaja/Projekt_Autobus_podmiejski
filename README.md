@@ -125,6 +125,8 @@ Symulacja generuje raport zawierający:
 
 
 ## Jak uruchomić używając Makefile:
-Kompilacja wszystkich plików: `make` 
+Kompilacja wszystkich plików: `make`
+
 Uruchomienie symulacji: `make run` 
- Czyszczenie plików binarnych:`make clean`
+
+Czyszczenie plików binarnych:`make clean`
