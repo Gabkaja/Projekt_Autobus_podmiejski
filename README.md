@@ -122,11 +122,16 @@ Symulacja generuje raport zawierający:
 
   
 ---
+## Wsparcie dla systemu Linux
+
+Symulacja została przetestowana i działa poprawnie w środowisku **Linux**.  
+Aplikacja uruchamia się z linii poleceń i nie wymaga dodatkowych modyfikacji systemowych.
+
+Zalecane jest korzystanie z aktualnej dystrybucji Linuxa oraz standardowych narzędzi dostępnych w systemie.
+
 
 
 ## Jak uruchomić używając Makefile:
-Kompilacja wszystkich plików: `make`
-
+Kompilacja wszystkich plików: `make` 
 Uruchomienie symulacji: `make run` 
-
-Czyszczenie plików binarnych:`make clean`
+ Czyszczenie plików binarnych:`make clean`
