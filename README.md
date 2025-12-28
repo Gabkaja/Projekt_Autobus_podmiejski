@@ -122,16 +122,20 @@ Symulacja generuje raport zawierający:
 
   
 ---
+
 ## Wsparcie dla systemu Linux
 
 Symulacja została przetestowana i działa poprawnie w środowisku **Linux**.  
-Aplikacja uruchamia się z linii poleceń i nie wymaga dodatkowych modyfikacji systemowych.
+Testy zostały przeprowadzone na platformie **Raspberry Pi 3B+** z systemem **Raspberry Pi OS**.
 
-Zalecane jest korzystanie z aktualnej dystrybucji Linuxa oraz standardowych narzędzi dostępnych w systemie.
+Aplikacja uruchamia się z linii poleceń i nie wymaga dodatkowych modyfikacji systemowych.  
+Zalecane jest korzystanie z aktualnej wersji systemu oraz standardowych narzędzi dostępnych w dystrybucji.
 
 
 
 ## Jak uruchomić używając Makefile:
 Kompilacja wszystkich plików: `make` 
+
 Uruchomienie symulacji: `make run` 
+
  Czyszczenie plików binarnych:`make clean`
