@@ -1,27 +1,36 @@
+
 #ifndef IPC_H
 #define IPC_H
 
 #include <sys/types.h>
 
-#define SHM_KEY 0x1234
-#define SEM_KEY 0x2345
-#define MSG_KEY 0x3456
+#define SHM_PATH "bus_shm.key"
+#define SEM_PATH "bus_sem.key"
+#define MSG_PATH "bus_msg.key"
 
-#define MAX_P 50
-#define MAX_R 10
-#define TOTAL_PASSENGERS 20
+#define REGISTER 1
 
 struct BusState {
+    int P;
+    int R;
+    int T;
+    int N;
     int passengers;
     int bikes;
-    int blocked;
+    int departing;
+    int station_blocked;
     int active_passengers;
     pid_t driver_pid;
+    int shutdown;
 };
 
 struct msg {
     long type;
     pid_t pid;
+    int vip;
+    int bike;
+    int child;
+    int ticket_ok;
 };
 
 #endif
