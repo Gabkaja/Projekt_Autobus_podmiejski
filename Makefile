@@ -1,28 +1,29 @@
 # Makefile do projektu Autobus Podmiejski
 
 CC = gcc
-CFLAGS = -Wall -std=c99
-TARGETS = main driver cashier dispatcher passenger
+CFLAGS = -O2 -Wall -Wextra -std=c99 -D_POSIX_C_SOURCE=200809L
 
-all: $(TARGETS)
+.PHONY: all clean run
+
+all: main driver cashier dispatcher passenger
 
 main: main.c ipc.h
-	$(CC) $(CFLAGS) -o main main.c
+        $(CC) $(CFLAGS) -o main main.c
 
 driver: driver.c ipc.h
-	$(CC) $(CFLAGS) -o driver driver.c
+        $(CC) $(CFLAGS) -o driver driver.c
 
 cashier: cashier.c ipc.h
-	$(CC) $(CFLAGS) -o cashier cashier.c
+        $(CC) $(CFLAGS) -o cashier cashier.c
 
 dispatcher: dispatcher.c ipc.h
-	$(CC) $(CFLAGS) -o dispatcher dispatcher.c
+        $(CC) $(CFLAGS) -o dispatcher dispatcher.c
 
 passenger: passenger.c ipc.h
-	$(CC) $(CFLAGS) -o passenger passenger.c
+        $(CC) $(CFLAGS) -o passenger passenger.c
 
 run: all
-	./main
+        ./main 2 10 3 8 25
 
 clean:
-	rm -f $(TARGETS)
+        rm -f main driver cashier dispatcher passenger report.txt bus_shm.key bus_sem.key bus_msg.key
