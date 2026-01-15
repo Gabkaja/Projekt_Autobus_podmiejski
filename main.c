@@ -77,6 +77,14 @@ void handle_sigint(int sig) {
     log_write(ln);
 }
 
+void handle_sigchld(int sig) {
+    (void)sig;
+    int saved_errno = errno;
+    while (waitpid(-1, NULL, WNOHANG) > 0) {
+    }
+    errno = saved_errno;
+}
+
 int main(int argc, char** argv) {
     if (argc < 6) {
         fprintf(stderr, "Uzycie: %s N P R T TOTAL\n", argv[0]);
@@ -239,6 +247,15 @@ int main(int argc, char** argv) {
     sa.sa_flags = SA_RESTART;
     if (sigaction(SIGINT, &sa, NULL) == -1) {
         perror("sigaction SIGINT");
+    }
+
+    struct sigaction sa_chld;
+    memset(&sa_chld, 0, sizeof(sa_chld));
+    sa_chld.sa_handler = handle_sigchld;
+    sigemptyset(&sa_chld.sa_mask);
+    sa_chld.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    if (sigaction(SIGCHLD, &sa_chld, NULL) == -1) {
+        perror("sigaction SIGCHLD");
     }
 
     for (int i = 0; i < N; i++) {

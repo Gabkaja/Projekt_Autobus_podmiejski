@@ -5,6 +5,7 @@
 #include <sys/shm.h>
 #include <sys/sem.h>
 #include <sys/msg.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
@@ -272,6 +273,12 @@ int main() {
                 if (close(pipefd[1]) == -1) {
                     perror("close pipe write");
                 }
+
+                int status;
+                if (waitpid(cpid, &status, 0) == -1) {
+                    perror("waitpid child");
+                }
+
                 if (shmdt(bus) == -1) {
                     perror("shmdt");
                 }
@@ -289,6 +296,12 @@ int main() {
                 if (close(pipefd[1]) == -1) {
                     perror("close pipe write");
                 }
+
+                int status;
+                if (waitpid(cpid, &status, 0) == -1) {
+                    perror("waitpid child");
+                }
+
                 if (shmdt(bus) == -1) {
                     perror("shmdt");
                 }
@@ -305,6 +318,11 @@ int main() {
             }
             if (close(pipefd[1]) == -1) {
                 perror("close pipe write");
+            }
+
+            int status;
+            if (waitpid(cpid, &status, 0) == -1) {
+                perror("waitpid child");
             }
 
             snprintf(ln, sizeof(ln), "[%s] [DOROSLY+DZIECKO %d] Wejscie\n", b, getpid());
