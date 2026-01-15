@@ -348,46 +348,125 @@ make
 ```bash
 ulimit -u 4096
 ```
+---
+## 🔗 Linki do Kluczowych Fragmentów Kodu
 
-## 📚 Dokumentacja techniczna
+### a. Tworzenie i obsługa plików
 
-### Architektura synchronizacji:
+Wykorzystanie `open()`, `write()`, `close()` do logowania zdarzeń:
 
-- **Semafor 0**: Mutex dla pamięci dzielonej (BusState)
-- **Semafor 1**: Bramka dla pasażerów bez rowerów
-- **Semafor 2**: Bramka dla pasażerów z rowerami
-- **Semafor 3**: Mutex dla autobusu na dworcu (tylko 1 autobus jednocześnie)
+**driver.c**
 
-### Struktura pamięci dzielonej (BusState):
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L29C1-L41C2
 
+---
+
+### b. Tworzenie procesów
+
+Podstawa architektury - `fork()` + `exec()`:
+
+**main.c**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L261C1-L306C6
+
+
+---
+
+
+### d. Obsługa sygnałów
+
+**dispatcher.c - Handler SIGINT**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/dispatcher.c#L39C1-L56C2
+
+**driver.c - Handler SIGUSR1**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L71C1-L74C2
+
+**main.c - Rejestracja handlera**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L243C5-L250C6
+
+---
+
+### e. Synchronizacja procesów (semafory)
+
+**driver.c - Operacje semaforowe**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L43C1-L69C2
+
+**main.c - Inicjalizacja semaforów**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L196C4-L222C6
+
+---
+
+### f. Łącza nazwane i nienazwane (pipe)
+
+**passenger.c - Synchronizacja rodzic-dziecko**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/passenger.c#L206C3-L243C14
+
+---
+
+### g. Segmenty pamięci dzielonej
+
+**main.c - Tworzenie i inicjalizacja**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L182C1-L194C6
+
+
+**ipc.h - Struktura pamięci dzielonej (linie 12-24)**
 ```c
 struct BusState {
     int P;                    // Pojemność pasażerów
     int R;                    // Pojemność rowerów
     int T;                    // Czas oczekiwania
     int N;                    // Liczba autobusów
-    int passengers;           // Aktualna liczba pasażerów w autobusie
+    int passengers;           // Aktualna liczba w autobusie
     int bikes;                // Aktualna liczba rowerów
     int departing;            // Flaga odjazdu
     int station_blocked;      // Flaga blokady dworca
-    int active_passengers;    // Liczba aktywnych procesów pasażerów
-    pid_t driver_pid;         // PID aktualnego kierowcy na dworcu
-    int shutdown;             // Flaga globalnego shutdown
+    int active_passengers;    // Liczba aktywnych procesów
+    pid_t driver_pid;         // PID kierowcy na dworcu
+    int shutdown;             // Flaga shutdown
 };
 ```
 
-### Komunikaty (msg queue):
+**main.c - Usuwanie pamięci**
 
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L46C1-L49C6
+
+---
+
+### h. Kolejki komunikatów
+
+**main.c - Tworzenie kolejki**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L223C1-L229C6
+
+**ipc.h - Struktura wiadomości (linie 26-33)**
 ```c
 struct msg {
-    long type;        // Typ wiadomości (REGISTER=1 lub PID pasażera)
+    long type;        // Typ: REGISTER lub PID pasażera
     pid_t pid;        // PID pasażera
     int vip;          // Czy VIP (0/1)
-    int bike;         // Czy ma rower (0/1)
+    int bike;         // Czy rower (0/1)
     int child;        // Czy dziecko (0/1)
     int ticket_ok;    // Czy bilet OK (0/1)
 };
 ```
+
+**passenger.c - Wysyłanie zapytania**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/passenger.c#L125C4-L135C6
+
+**cashier.c - Odbieranie i odpowiedź**
+
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/cashier.c#L71C1-L112C6
+
+
+---
 
 
 
