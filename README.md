@@ -210,6 +210,14 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** Pierwsze 10 osób wchodzi, reszta dostaje "Brak miejsca"
 
+**Rezultat:** zgodnie z oczekiwaniami - nadprogramowe osoby dostają "Brak miejsca"
+
+```txt
+[18:42:01] [KASA] Rejestracja PID 180677 VIP 0 DZIECKO 0
+[18:42:01] [KASA] Rejestracja PID 180678 VIP 0 DZIECKO 0
+[18:42:00] [PASAZER 180677] Brak miejsca
+[18:42:00] [PASAZER 180678] Brak miejsca
+```
 ---
 
 ### Test 2: Wymuszenie odjazdu (SIGUSR1)
@@ -222,6 +230,12 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** W logach pojawia się "[DYSPOZYTOR] Wymuszenie odjazdu" przed upływem pełnych 10s
 
+**Rezultat:** zgodnie z oczekiwaniami
+
+```txt
+[18:36:35] [KIEROWCA 180132] Odjazd: 4 pasazerow, 3 rowerow
+[18:36:35] [DYSPOZYTOR] Wymuszenie odjazdu
+```
 ---
 
 ### Test 3: Blokada dworca (SIGUSR2)
@@ -234,6 +248,14 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** Po ~10s komunikaty "Blokada dworca", kasa i kierowcy kończą pracę
 
+**Rezulatat:** zgodnie z założeniem: komunikaty się pojawiają, a symulacja się kończy
+
+```txt
+[18:26:50] [DYSPOZYTOR] Blokada dworca
+[18:26:50] [KIEROWCA 179213] Blokada dworca
+[18:26:50] [DYSPOZYTOR] Koniec pracy
+[18:26:50] [KIEROWCA 179213] Koniec pracy
+```
 ---
 
 ### Test 4: Obsługa pasażerów VIP
@@ -258,6 +280,12 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** Logi zawierają "[DZIECKO ...] Bez opiekuna"
 
+**Rezultat:** zgodnie z oczekiwaniami, log z informacją o czecku bez opiekuna pojawia się:
+
+```txt
+[18:26:47] [DZIECKO 179234] Bez opiekuna
+```
+
 ---
 
 ### Test 6: Stress test (bez sleep)
@@ -270,6 +298,31 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** Brak deadlocków, wszystkie procesy kończą się poprawnie, synchronizacja działa
 
+**Rezultat:**
+brak deadlocków, brak zagłodzenia procesów, wszystkie procesy zakończyły działanie poprawnie, semafory i pamięć współdzielona działały poprawnie
+
+Fragment logów: 
+
+```txt
+[18:11:37] [KIEROWCA 177739] Odjazd: 50 pasazerow, 20 rowerow
+[18:11:37] [KIEROWCA 177739] Powrot po 9s
+[18:11:37] [KIEROWCA 177740] Autobus na dworcu
+[18:11:38] [DYSPOZYTOR] Wymuszenie odjazdu
+[18:11:38] [KIEROWCA 177740] Odjazd: 0 pasazerow, 0 rowerow
+[18:11:38] [KIEROWCA 177740] Powrot po 4s
+[18:11:38] [KIEROWCA 177741] Autobus na dworcu
+[18:11:42] [KIEROWCA 177741] Odjazd: 0 pasazerow, 0 rowerow
+[18:11:42] [KIEROWCA 177741] Powrot po 8s
+[18:11:42] [KIEROWCA 177743] Autobus na dworcu
+[18:11:43] [DYSPOZYTOR] Blokada dworca
+[18:11:43] [KIEROWCA 177743] Blokada dworca
+[18:11:43] [DYSPOZYTOR] Koniec pracy
+[18:11:43] [KIEROWCA 177743] Koniec pracy
+[18:11:43] [KIEROWCA 177739] Koniec pracy
+[18:11:43] [KIEROWCA 177740] Koniec pracy
+[18:11:43] [KIEROWCA 177742] Koniec pracy
+[18:11:43] [KIEROWCA 177741] Koniec pracy
+```
 ---
 
 ### Test 7: Sprzątanie zasobów IPC
@@ -285,6 +338,27 @@ ipcs -q  # kolejki komunikatów
 ```
 
 **Oczekiwany wynik:** Brak pozostałości po symulacji w systemie
+
+**Rezultat:** zgodnie z oczekiwaniami - brak pozostałości
+
+```txt
+gab@raspberrypi:~/projekt $ ipcs
+
+------ Message Queues --------
+key        msqid      owner      perms      used-bytes   messages    
+
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+
+------ Semaphore Arrays --------
+key        semid      owner      perms      nsems     
+
+gab@raspberrypi:~/projekt $ ps
+    PID TTY          TIME CMD
+ 177201 pts/0    00:00:00 bash
+ 178891 pts/0    00:00:00 ps
+
+```
 
 ---
 
