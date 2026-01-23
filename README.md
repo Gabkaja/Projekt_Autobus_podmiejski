@@ -1,187 +1,538 @@
-﻿# 🚍 Symulacja „Autobus podmiejski"
+# 🚍 Symulacja „Autobus podmiejski"
 
-Symulacja systemu obsługi autobusów podmiejskich działająca na procesach z użyciem **System V IPC** (pamięć dzielona, semafory, kolejki komunikatów), sygnałów oraz plików.
+Zaawansowana symulacja systemu obsługi autobusów podmiejskich działająca na procesach z użyciem **System V IPC** (pamięć dzielona, semafory, kolejki komunikatów), sygnałów oraz plików.
 
 ## 📦 Funkcjonalności
 
+### Podstawowe mechanizmy
 - **Flota N autobusów** o pojemności **P pasażerów** i **R miejsc na rowery**
-- **Dwa wejścia do autobusu** (normalne / rowery) — przez każdą bramkę może przejść jedna osoba na raz
-- **Odjazdy co T sekund** + możliwość wymuszenia odjazdu (dyspozytor → SIGUSR1)
-- **Losowe czasy powrotu** Ti (3-9s) dla każdego kursu
-- **Kasa** rejestruje wszystkich pasażerów; zwykli pasażerowie dostają odpowiedź „bilet OK"
-- **VIP (~1%)**: mają wcześniej bilet, omijają płatność, ale są rejestrowani
-- **Dzieci < 8 lat**: tylko z dorosłym opiekunem; dziecko zajmuje osobne miejsce
-- **Blokada dworca (SIGUSR2)**: pasażerowie nie wchodzą, system kończy pracę
-- **Raport z przebiegu** w pliku `report.txt` (append)
-- **Kontrolowane zakończenie** po Ctrl+C (SIGINT) — sprzątanie IPC i zamknięcie procesów
+- **Dwa niezależne wejścia** (normalne / z rowerem) — synchronizowane semaforami bramek
+- **Inteligentny system odjazdów** co T sekund z możliwością wymuszenia (SIGUSR1)
+- **Losowe czasy powrotu** Ti ∈ [3,9] sekund dla każdego kursu
+- **Tylko jeden autobus na dworcu** — synchronizacja przez semafor dworca
+
+### Obsługa pasażerów
+- **Kasa biletowa** — rejestruje wszystkich pasażerów, wystawia bilety dla zwykłych pasażerów
+- **Pasażerowie VIP (~1%)** — mają wcześniej zakupiony bilet, tylko rejestracja
+- **Dzieci < 8 lat** — wymagają obecności dorosłego opiekuna
+- **Dorośli z dziećmi** — zajmują 2 miejsca, dziecko tworzy osobny proces
+- **Pasażerowie z rowerami** — używają dedykowanej bramki
+
+### Kontrola systemu
+- **Dyspozytor** — nadzoruje pracę kierowców, może wymusić odjazd lub zablokować dworzec
+- **Blokada dworca (SIGUSR2)** — stopniowe zamknięcie z oczekiwaniem na zakończenie procesów
+- **Raport szczegółowy** w `report.txt` z timestampami wszystkich zdarzeń
+- **Graceful shutdown** po SIGINT — czyszczenie zasobów IPC
 
 ## 🖥️ Wymagania
 
-- **System**: Linux (testowane na Ubuntu/Debian)
-- **Pakiety**: `gcc`, `make`
-- Brak dodatkowych bibliotek (używane standardowe nagłówki systemowe POSIX/System V)
-
-
+- **System**: Linux (testowane na Ubuntu/Debian/Raspberry Pi OS)
+- **Kompilator**: GCC z obsługą C99
+- **Pakiety**: `build-essential`, `make`
+- Brak zewnętrznych bibliotek — tylko standardowe nagłówki POSIX/System V
 
 ## 📁 Struktura projektu
 
 ```
 .
-├── ipc.h              # Definicje struktur i stałych IPC
-├── main.c             # Proces główny (uruchamia całą symulację)
-├── driver.c           # Proces kierowcy autobusu
-├── cashier.c          # Proces kasy biletowej
-├── dispatcher.c       # Proces dyspozytora (sygnały)
-├── passenger.c        # Proces pasażera
-├── Makefile           # Automatyzacja kompilacji
-└── report.txt         # Log zdarzeń (tworzony automatycznie)
+├── ipc.h                    # Definicje struktur i stałych IPC
+├── main.c                   # Proces główny (inicjalizacja systemu)
+├── driver.c                 # Proces kierowcy autobusu
+├── cashier.c                # Proces kasy biletowej
+├── dispatcher.c             # Proces dyspozytora (zarządzanie sygnałami)
+├── passenger.c              # Proces pasażera (logika wejścia)
+├── passenger_generator.c    # Generator procesów pasażerów
+├── Makefile                 # Automatyzacja kompilacji i czyszczenia
+├── README.md                # Dokumentacja projektu
+└── report.txt               # Log zdarzeń (tworzony automatycznie)
 ```
 
 ## 🔨 Kompilacja
 
-W katalogu projektu:
+W katalogu projektu wykonaj:
 
 ```bash
 make
 ```
 
 Powstaną pliki wykonywalne:
-- `./main`
-- `./driver`
-- `./cashier`
-- `./dispatcher`
-- `./passenger`
+- `./main` — proces główny
+- `./driver` — kierowca autobusu
+- `./cashier` — kasa biletowa
+- `./dispatcher` — dyspozytor
+- `./passenger` — proces pasażera
+- `./passenger_generator` — generator pasażerów
 
-### Czyszczenie:
+### Czyszczenie zasobów:
 
 ```bash
 make clean
 ```
 
-Usuwa binarki, logi i zasoby IPC.
+Usuwa binarki, logi, pliki kluczy IPC i czyści zasoby systemowe.
 
 ## ▶️ Uruchomienie
 
-Program główny wymaga 5 parametrów:
+Program główny wymaga **5 parametrów**:
 
 ```bash
 ./main N P R T TOTAL
 ```
 
-**Gdzie:**
-- `N` – liczba autobusów (1-100)
-- `P` – pojemność pasażerów (1-1000)
-- `R` – liczba miejsc na rowery (0-100)
-- `T` – czas oczekiwania na dworcu w sekundach (1-3600)
-- `TOTAL` – całkowita liczba pasażerów w symulacji (1-10000)
+**Parametry:**
+- `N` — liczba autobusów w flocie (1-100)
+- `P` — maksymalna pojemność pasażerów (1-1000)
+- `R` — liczba miejsc na rowery (0-100)
+- `T` — czas oczekiwania na dworcu w sekundach (1-3600)
+- `TOTAL` — całkowita liczba pasażerów do wygenerowania (1-10000)
 
-### Przykład:
+### Przykłady uruchomienia:
 
+#### Mała symulacja (test funkcjonalności):
 ```bash
 ./main 2 10 5 3 20
 ```
+**Opis:** 2 autobusy, 10 pasażerów max, 5 rowerów max, 3s oczekiwanie, 20 pasażerów ogółem
 
-**Opis:** 2 autobusy, 10 pasażerów max, 5 rowerów max, 3s oczekiwanie, 20 pasażerów total
-
-### Alternatywnie (domyślne parametry):
-
+#### Średnia symulacja (typowe użycie):
 ```bash
-make run
+./main 3 20 10 5 50
 ```
+**Opis:** 3 autobusy, 20 pasażerów max, 10 rowerów max, 5s oczekiwanie, 50 pasażerów ogółem
 
-## 📝 Logi
+#### Duża symulacja (test stabilności):
+```bash
+./main 5 50 20 4 100
+```
+**Opis:** 5 autobusów, 50 pasażerów max, 20 rowerów max, 4s oczekiwanie, 100 pasażerów ogółem
 
-Wszystkie zdarzenia zapisują się do:
+## 📝 System logowania
+
+Wszystkie zdarzenia zapisują się do pliku:
 
 ```
 report.txt
 ```
 
-**Zdarzenia w logu:**
-- Rejestracje w kasie
-- Wejścia do autobusu
-- Odjazdy i powroty
-- Blokady dworca
-- Zakończenia pracy procesów
+### Format logów:
 
-### Podgląd na żywo:
+```
+[HH:MM:SS] [MODUŁ] Opis zdarzenia
+```
+
+### Rodzaje zdarzeń w logu:
+
+| Moduł | Przykładowe zdarzenia |
+|-------|----------------------|
+| **MAIN** | Start systemu, zakończenie systemu |
+| **GENERATOR** | Utworzenie pasażera, zakończenie generowania |
+| **KASA** | Rejestracja pasażera (VIP/DZIECKO), koniec pracy |
+| **PASAZER** | Przybycie, wejście do autobusu, odmowy |
+| **DZIECKO** | Odmowa (brak opiekuna) |
+| **DOROSLY+DZIECKO** | Wejście z dzieckiem |
+| **KIEROWCA** | Przyjazd, odjazd (liczba pasażerów/rowerów), powrót |
+| **DYSPOZYTOR** | Wymuszenie odjazdu, blokada dworca |
+
+### Podgląd logów na żywo:
 
 ```bash
 tail -f report.txt
 ```
 
-> **Uwaga:** Plik `report.txt` jest dopisywany (append). Czyszczony przy `make clean`.
-
-## 🧭 Sterowanie i sygnały
-
-| Sygnał | Źródło | Opis |
-|--------|--------|------|
-| **SIGUSR1** | Dyspozytor → Kierowca | Wymuszenie odjazdu autobusu (po ~5s) |
-| **SIGUSR2** | Dyspozytor → Kierowca | Blokada dworca (po ~10s) |
-| **SIGINT** (Ctrl+C) | Użytkownik → Main | Grzeczne zakończenie symulacji |
-
-### Działanie sygnałów:
-
-- **SIGUSR1**: Autobus odjeżdża natychmiast, nawet jeśli nie upłynął pełny czas T
-- **SIGUSR2**: Dworzec zostaje zablokowany, nowi pasażerowie nie wchodzą, kierowcy kończą pracę
-- **SIGINT**: Ustawienie `shutdown=1`, sprzątanie IPC (shm, sem, msg), zakończenie wszystkich procesów
-
-## 🔎 Przykładowy przebieg (skrócony)
+### Przykładowy fragment logu:
 
 ```
-[22:32:08] [KIEROWCA 66932] Autobus na dworcu
-[22:32:08] [KASA] Rejestracja PID 66939 VIP 0 DZIECKO 0
-[22:32:08] [PASAZER 66939] Wejscie
-[22:32:08] [DZIECKO 66938] Bez opiekuna
-[22:32:08] [DOROSLY+DZIECKO 66948] Wejscie
-[22:32:08] [PASAZER 67030] Brak miejsca
-[22:32:12] [KIEROWCA 66932] Odjazd: 50 pasazerow, 20 rowerow
-[22:32:12] [KIEROWCA 66932] Powrot po 7s
-[22:32:13] [DYSPOZYTOR] Wymuszenie odjazdu
-[22:32:18] [DYSPOZYTOR] Blokada dworca
-[22:32:18] [KIEROWCA 66935] Koniec pracy
-[22:32:18] [KASA] Koniec pracy
+[18:42:15] [MAIN] Start systemu: N=3 P=20 R=10 T=5 TOTAL=50
+[18:42:15] [GENERATOR] Start - utworzy 50 pasazerow
+[18:42:15] [KASA] Start pracy
+[18:42:15] [DYSPOZYTOR] Start pracy
+[18:42:15] [KIEROWCA 12345] Start pracy
+[18:42:15] [KIEROWCA 12345] Autobus na dworcu
+[18:42:16] [PASAZER 12350] Przybycie (VIP=0 wiek=25 rower=1 dziecko=0)
+[18:42:16] [KASA] Rejestracja PID=12350 VIP=0 DZIECKO=0
+[18:42:16] [PASAZER 12350] Wsiadl
+[18:42:18] [PASAZER 12355] Przybycie (VIP=0 wiek=32 rower=0 dziecko=1)
+[18:42:18] [KASA] Rejestracja PID=12355 VIP=0 DZIECKO=0
+[18:42:18] [KASA] Rejestracja PID=12356 VIP=0 DZIECKO=1
+[18:42:18] [DOROSLY+DZIECKO 12355] Wsiadl
+[18:42:20] [KIEROWCA 12345] Odjazd: 3 pasazerow, 1 rowerow
+[18:42:27] [KIEROWCA 12345] Powrot po 7s
 ```
 
-## 🧹 Sprzątanie zasobów
+> **Uwaga:** Plik `report.txt` jest dopisywany (append). Czyszczony przy każdym `make clean`.
 
-Po zakończeniu lub przed ponownym uruchomieniem:
+## 🧭 Sterowanie sygnałami
+
+System reaguje na następujące sygnały:
+
+| Sygnał | Źródło | Odbiorca | Działanie |
+|--------|--------|----------|-----------|
+| **SIGUSR1** | Dyspozytor | Kierowca | Wymuszenie natychmiastowego odjazdu autobusu |
+| **SIGUSR2** | Dyspozytor | Kierowca | Blokada dworca i rozpoczęcie shutdown |
+| **SIGINT** (Ctrl+C) | Użytkownik | Main → Dyspozytor | Graceful shutdown całego systemu |
+| **SIGCHLD** | Kernel | Main, Generator | Zbieranie zombie processes |
+
+### Szczegółowe działanie sygnałów:
+
+#### SIGUSR1 — Wymuszenie odjazdu
+```bash
+killall -SIGUSR1 dispatcher
+```
+- Dyspozytor przekazuje sygnał do kierowcy aktualnie na dworcu
+- Autobus odjeżdża natychmiast (skrócenie czasu T)
+- Logowane jako `[DYSPOZYTOR] Wymuszenie odjazdu`
+
+#### SIGUSR2 — Blokada dworca
+```bash
+killall -SIGUSR2 dispatcher
+```
+- Ustawienie flag `station_blocked=1` i `shutdown=1`
+- Nowi pasażerowie nie mogą wejść
+- Kierowcy kończą pracę po powrocie z kursu
+- Logowane jako `[DYSPOZYTOR] Blokada dworca`
+
+#### SIGINT — Shutdown systemu
+```bash
+# W terminalu z uruchomionym programem:
+Ctrl+C
+```
+- Ustawienie flag `shutdown=1`, `station_blocked=1`
+- Przekazanie SIGINT do dyspozytora
+- Czekanie na zakończenie wszystkich procesów potomnych
+- Czyszczenie zasobów IPC (shm, sem, msg)
+- Usunięcie plików kluczy
+
+## 🔐 Mechanizmy synchronizacji
+
+### Semafory (4 semafory w zestawie):
+
+| Indeks | Początkowa wartość | Przeznaczenie |
+|--------|-------------------|---------------|
+| **0** | 1 | Ochrona pamięci dzielonej (mutex) |
+| **1** | 1 | Bramka dla pasażerów bez roweru |
+| **2** | 1 | Bramka dla pasażerów z rowerem |
+| **3** | 1 | Dostęp do dworca (tylko 1 autobus) |
+
+### Pamięć dzielona (struktura `BusState`):
+
+```c
+struct BusState {
+    int P;                      // Maksymalna liczba pasażerów
+    int R;                      // Maksymalna liczba rowerów
+    int T;                      // Czas oczekiwania na dworcu
+    int N;                      // Liczba autobusów
+    int passengers;             // Aktualna liczba pasażerów w autobusie
+    int bikes;                  // Aktualna liczba rowerów w autobusie
+    int departing;              // Flaga: autobus odjeżdża
+    int station_blocked;        // Flaga: dworzec zablokowany
+    int active_passengers;      // Liczba aktywnych pasażerów w systemie
+    int total_passengers;       // Całkowita liczba pasażerów do obsłużenia
+    int boarded_passengers;     // Liczba pasażerów, którzy weszli do autobusu
+    pid_t driver_pid;           // PID aktualnego kierowcy na dworcu
+    int shutdown;               // Flaga: system się wyłącza
+    int cashier_done;           // Flaga: kasa zakończyła pracę
+    int generator_done;         // Flaga: generator zakończył pracę
+};
+```
+
+### Kolejka komunikatów:
+
+**Typy wiadomości:**
+- `MSG_REGISTER (1)` — Rejestracja pasażera w kasie
+- `MSG_TICKET_REPLY + PID` — Unikalny typ odpowiedzi dla każdego pasażera
+
+**Struktura wiadomości:**
+```c
+struct msg {
+    long type;          // Typ wiadomości
+    pid_t pid;          // PID pasażera
+    int vip;            // Czy VIP (0/1)
+    int bike;           // Czy ma rower (0/1)
+    int child;          // Czy dziecko (0/1)
+    int ticket_ok;      // Czy bilet zatwierdzony (0/1)
+};
+```
+
+## 🔄 Przepływ procesów
+
+### 1. Inicjalizacja (main.c)
+```
+main → fork() → driver (x N)
+     → fork() → cashier
+     → fork() → dispatcher
+     → fork() → passenger_generator
+```
+
+### 2. Generator pasażerów
+- Co 1-3 sekundy tworzy nowy proces pasażera
+- Inkrementuje `active_passengers`
+- Po utworzeniu TOTAL pasażerów ustawia `generator_done=1`
+
+### 3. Pasażer (passenger.c)
+```
+Losowanie: VIP (1%), rower (50%), wiek, dziecko (20% dla dorosłych)
+    ↓
+Sprawdzenie: dworzec otwarty?
+    ↓
+Dziecko < 8 lat? → KONIEC (bez opiekuna)
+    ↓
+Rejestracja w kasie (msgid)
+    ↓
+VIP? TAK → omijamy czekanie
+    ↓ NIE
+Czekanie na bilet (msgrcv)
+    ↓
+Dorośli z dzieckiem? → fork() dziecka + pipe
+    ↓
+Pętla próby wejścia (try_board):
+    - Blokada odpowiedniej bramki (1 lub 2)
+    - Sprawdzenie miejsca (P, R)
+    - Wejście lub czekanie
+    ↓
+Dekrementacja active_passengers
+```
+
+### 4. Kierowca (driver.c)
+```
+Pętla nieskończona:
+    ↓
+Zablokuj semafor dworca (tylko 1 autobus)
+    ↓
+Czekaj T sekund (lub SIGUSR1)
+    ↓
+Sprawdź warunki shutdown
+    ↓
+Zablokuj obie bramki
+    ↓
+Ustaw departing=1
+    ↓
+Zaloguj odjazd (passengers, bikes)
+    ↓
+Wyzeruj liczniki
+    ↓
+Odblokuj bramki i dworzec
+    ↓
+Jazda (sleep Ti ∈ [3,9]s)
+    ↓
+Powrót
+```
+
+### 5. Kasa (cashier.c)
+```
+Pętla nieskończona:
+    ↓
+msgrcv(MSG_REGISTER, IPC_NOWAIT)
+    ↓
+Znaleziono? → Zaloguj rejestrację
+    ↓
+VIP lub dziecko? → Pomiń wysyłanie biletu
+    ↓ NIE
+msgsnd(MSG_TICKET_REPLY + PID)
+    ↓
+Sprawdź warunki zakończenia:
+    - shutdown=1
+    - generator_done && active_passengers=0
+    ↓
+Ustaw cashier_done=1
+```
+
+### 6. Dyspozytor (dispatcher.c)
+```
+Rejestracja handlerów:
+    - SIGINT → shutdown
+    - SIGUSR1 → wymuszenie odjazdu
+    - SIGUSR2 → blokada dworca
+    ↓
+pause() — czekanie na sygnał
+    ↓
+Przekazanie sygnałów do kierowcy
+```
+
+## ✅ Przykładowe testy
+
+### Test 1: Limit pojemności pasażerów i rowerów
+
+**Cel:** Sprawdzenie odmowy wejścia po osiągnięciu limitu
 
 ```bash
-make clean
+./main 2 10 3 8 50
 ```
 
-**Usuwa:**
-- Binarki (`main`, `driver`, `cashier`, `dispatcher`, `passenger`)
-- Pliki tymczasowe (`report.txt`, `bus_*.key`)
-- Zasoby IPC (pamięć dzielona, semafory, kolejki komunikatów)
+**Oczekiwany wynik:** Pierwsze 10 osób wchodzi, reszta czeka na następny autobus
 
-### Ręczne sprawdzenie zasobów IPC:
+**Fragment logu:**
+```
+[18:42:01] [PASAZER 180677] Wsiadl
+[18:42:01] [PASAZER 180678] Wsiadl
+[18:42:05] [KIEROWCA 180650] Odjazd: 10 pasazerow, 3 rowerow
+```
+
+---
+
+### Test 2: Wymuszenie odjazdu (SIGUSR1)
+
+**Cel:** Weryfikacja przedwczesnego odjazdu autobusu
 
 ```bash
+./main 2 15 5 10 20 &
+# Po 3 sekundach:
+killall -SIGUSR1 dispatcher
+```
+
+**Oczekiwany wynik:** W logach pojawia się `[DYSPOZYTOR] Wymuszenie odjazdu` przed upływem pełnych 10s
+
+**Fragment logu:**
+```
+[18:36:35] [KIEROWCA 180132] Autobus na dworcu
+[18:36:38] [DYSPOZYTOR] Wymuszenie odjazdu
+[18:36:38] [KIEROWCA 180132] Odjazd: 4 pasazerow, 3 rowerow
+```
+
+---
+
+### Test 3: Blokada dworca (SIGUSR2)
+
+**Cel:** Sprawdzenie blokady i kontrolowanego zakończenia systemu
+
+```bash
+./main 2 10 3 8 30 &
+sleep 10
+killall -SIGUSR2 dispatcher
+```
+
+**Oczekiwany wynik:** Komunikaty "Blokada dworca", kasa i kierowcy kończą pracę, sprzątanie zasobów
+
+**Fragment logu:**
+```
+[18:26:50] [DYSPOZYTOR] Blokada dworca
+[18:26:50] [KIEROWCA 179213] Koniec pracy
+[18:26:51] [KASA] Koniec pracy
+[18:26:51] [MAIN] System zakonczony
+```
+
+---
+
+### Test 4: Obsługa pasażerów VIP
+
+**Cel:** Weryfikacja rejestracji VIP bez oczekiwania na bilet
+
+```bash
+./main 3 20 5 8 200
+```
+
+**Oczekiwany wynik:** W logach wpisy `[KASA] Rejestracja PID ... VIP=1 ...` bez wysyłania biletów
+
+**Fragment logu:**
+```
+[19:15:42] [KASA] Rejestracja PID=185432 VIP=1 DZIECKO=0
+[19:15:42] [PASAZER 185432] Wsiadl
+```
+
+---
+
+### Test 5: Dziecko bez opiekuna
+
+**Cel:** Odmowa wejścia dziecku < 8 lat bez dorosłego
+
+```bash
+./main 2 10 3 8 50
+```
+
+**Oczekiwany wynik:** Logi zawierają `[DZIECKO ...] Bez opiekuna - odmowa`
+
+**Fragment logu:**
+```
+[18:26:47] [DZIECKO 179234] Bez opiekuna - odmowa
+```
+
+---
+
+### Test 6: Dorośli z dziećmi
+
+**Cel:** Sprawdzenie mechanizmu fork() + pipe dla rodzin
+
+```bash
+./main 2 15 5 5 30
+```
+
+**Oczekiwany wynik:** 
+- Rejestracja dorosłego i dziecka (osobne PID)
+- Zajęcie 2 miejsc w autobusie
+- Synchronizacja przez pipe
+
+**Fragment logu:**
+```
+[19:20:15] [PASAZER 187650] Przybycie (VIP=0 wiek=35 rower=0 dziecko=1)
+[19:20:15] [KASA] Rejestracja PID=187650 VIP=0 DZIECKO=0
+[19:20:15] [KASA] Rejestracja PID=187651 VIP=0 DZIECKO=1
+[19:20:16] [DOROSLY+DZIECKO 187650] Wsiadl
+```
+
+---
+
+### Test 7: Stress test (wiele procesów)
+
+**Cel:** Sprawdzenie synchronizacji przy jednoczesnym dostępie wielu procesów
+
+```bash
+./main 5 50 20 4 100
+```
+
+**Oczekiwany wynik:** 
+- Brak deadlocków
+- Wszystkie procesy kończą się poprawnie
+- Prawidłowa synchronizacja semaforów
+
+**Fragment logu:**
+```
+[18:11:37] [KIEROWCA 177739] Odjazd: 50 pasazerow, 20 rowerow
+[18:11:38] [KIEROWCA 177740] Autobus na dworcu
+[18:11:42] [KIEROWCA 177741] Odjazd: 0 pasazerow, 0 rowerow
+[18:11:43] [DYSPOZYTOR] Blokada dworca
+[18:11:43] [MAIN] System zakonczony
+```
+
+---
+
+### Test 8: Sprzątanie zasobów IPC
+
+**Cel:** Upewnienie się, że zasoby zostały usunięte po zakończeniu
+
+```bash
+./main 2 10 3 8 25
+# Po zakończeniu:
 ipcs -m  # pamięć dzielona
 ipcs -s  # semafory
 ipcs -q  # kolejki komunikatów
 ```
 
-### Ręczne usunięcie (jeśli make clean nie zadziałał):
+**Oczekiwany wynik:** Brak pozostałości w systemie
 
-```bash
-ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
+```txt
+------ Message Queues --------
+key        msqid      owner      perms      used-bytes   messages    
+
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+
+------ Semaphore Arrays --------
+key        semid      owner      perms      nsems     
 ```
 
-## ⚙️ Użyte mechanizmy systemowe
+---
+
+## 🧹 Użyte mechanizmy systemowe
 
 ### Procesy:
 - `fork()` – tworzenie procesów potomnych
 - `execl()` – zastępowanie obrazu procesu
-- `wait()` – oczekiwanie na zakończenie procesów potomnych
+- `wait()`, `waitpid()` – oczekiwanie na zakończenie procesów potomnych
 - `_exit()` – zakończenie procesu bez sprzątania stdio
 
 ### Sygnały:
 - `sigaction()` – rejestracja obsługi sygnałów
 - `kill()` – wysyłanie sygnałów do innych procesów
-- `SIGUSR1`, `SIGUSR2`, `SIGINT` – sygnały sterujące
+- `SIGUSR1`, `SIGUSR2`, `SIGINT`, `SIGCHLD` – sygnały sterujące
 
 ### IPC (System V):
 - `ftok()` – generowanie kluczy IPC
@@ -198,357 +549,13 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 - `write()` – zapis do logów
 - `unlink()` – usuwanie plików
 
-## ✅ Przykładowe testy
-
-### Test 1: Limit pojemności pasażerów i rowerów
-
-**Cel:** Sprawdzenie odmowy wejścia po osiągnięciu limitu
-
-```bash
-./main 2 10 3 8 50
-```
-
-**Oczekiwany wynik:** Pierwsze 10 osób wchodzi, reszta dostaje "Brak miejsca"
-
-**Rezultat:** zgodnie z oczekiwaniami - nadprogramowe osoby dostają "Brak miejsca"
-
-```txt
-[18:42:01] [KASA] Rejestracja PID 180677 VIP 0 DZIECKO 0
-[18:42:01] [KASA] Rejestracja PID 180678 VIP 0 DZIECKO 0
-[18:42:00] [PASAZER 180677] Brak miejsca
-[18:42:00] [PASAZER 180678] Brak miejsca
-```
 ---
-
-### Test 2: Wymuszenie odjazdu (SIGUSR1)
-
-**Cel:** Weryfikacja przedwczesnego odjazdu
-
-```bash
-./main 2 15 5 10 20
-```
-
-**Oczekiwany wynik:** W logach pojawia się "[DYSPOZYTOR] Wymuszenie odjazdu" przed upływem pełnych 10s
-
-**Rezultat:** zgodnie z oczekiwaniami
-
-```txt
-[18:36:35] [KIEROWCA 180132] Odjazd: 4 pasazerow, 3 rowerow
-[18:36:35] [DYSPOZYTOR] Wymuszenie odjazdu
-```
----
-
-### Test 3: Blokada dworca (SIGUSR2)
-
-**Cel:** Sprawdzenie blokady i zakończenia systemu
-
-```bash
-./main 2 10 3 8 30
-```
-
-**Oczekiwany wynik:** Po ~10s komunikaty "Blokada dworca", kasa i kierowcy kończą pracę
-
-**Rezulatat:** zgodnie z założeniem: komunikaty się pojawiają, a symulacja się kończy
-
-```txt
-[18:26:50] [DYSPOZYTOR] Blokada dworca
-[18:26:50] [KIEROWCA 179213] Blokada dworca
-[18:26:50] [DYSPOZYTOR] Koniec pracy
-[18:26:50] [KIEROWCA 179213] Koniec pracy
-```
----
-
-### Test 4: Obsługa pasażerów VIP
-
-**Cel:** Weryfikacja rejestracji VIP bez oczekiwania na bilet
-
-```bash
-./main 3 20 5 8 200
-```
-
-**Oczekiwany wynik:** W logach wpisy "[KASA] Rejestracja PID ... VIP 1 ..."
-
----
-
-### Test 5: Dziecko bez opiekuna
-
-**Cel:** Odmowa wejścia dziecku < 8 lat bez dorosłego
-
-```bash
-./main 2 10 3 8 50
-```
-
-**Oczekiwany wynik:** Logi zawierają "[DZIECKO ...] Bez opiekuna"
-
-**Rezultat:** zgodnie z oczekiwaniami, log z informacją o czecku bez opiekuna pojawia się:
-
-```txt
-[18:26:47] [DZIECKO 179234] Bez opiekuna
-```
-
----
-
-### Test 6: Stress test (bez sleep)
-
-**Cel:** Sprawdzenie synchronizacji przy jednoczesnym dostępie wielu procesów
-
-```bash
-./main 5 50 20 4 100
-```
-
-**Oczekiwany wynik:** Brak deadlocków, wszystkie procesy kończą się poprawnie, synchronizacja działa
-
-**Rezultat:**
-brak deadlocków, brak zagłodzenia procesów, wszystkie procesy zakończyły działanie poprawnie, semafory i pamięć współdzielona działały poprawnie
-
-Fragment logów: 
-
-```txt
-[18:11:37] [KIEROWCA 177739] Odjazd: 50 pasazerow, 20 rowerow
-[18:11:37] [KIEROWCA 177739] Powrot po 9s
-[18:11:37] [KIEROWCA 177740] Autobus na dworcu
-[18:11:38] [DYSPOZYTOR] Wymuszenie odjazdu
-[18:11:38] [KIEROWCA 177740] Odjazd: 0 pasazerow, 0 rowerow
-[18:11:38] [KIEROWCA 177740] Powrot po 4s
-[18:11:38] [KIEROWCA 177741] Autobus na dworcu
-[18:11:42] [KIEROWCA 177741] Odjazd: 0 pasazerow, 0 rowerow
-[18:11:42] [KIEROWCA 177741] Powrot po 8s
-[18:11:42] [KIEROWCA 177743] Autobus na dworcu
-[18:11:43] [DYSPOZYTOR] Blokada dworca
-[18:11:43] [KIEROWCA 177743] Blokada dworca
-[18:11:43] [DYSPOZYTOR] Koniec pracy
-[18:11:43] [KIEROWCA 177743] Koniec pracy
-[18:11:43] [KIEROWCA 177739] Koniec pracy
-[18:11:43] [KIEROWCA 177740] Koniec pracy
-[18:11:43] [KIEROWCA 177742] Koniec pracy
-[18:11:43] [KIEROWCA 177741] Koniec pracy
-```
----
-
-### Test 7: Sprzątanie zasobów IPC
-
-**Cel:** Upewnienie się, że zasoby zostały usunięte
-
-```bash
-./main 2 10 3 8 25
-# Po zakończeniu:
-ipcs -m  # pamięć dzielona
-ipcs -s  # semafory
-ipcs -q  # kolejki komunikatów
-```
-
-**Oczekiwany wynik:** Brak pozostałości po symulacji w systemie
-
-**Rezultat:** zgodnie z oczekiwaniami - brak pozostałości
-
-```txt
-gab@raspberrypi:~/projekt $ ipcs
-
------- Message Queues --------
-key        msqid      owner      perms      used-bytes   messages    
-
------- Shared Memory Segments --------
-key        shmid      owner      perms      bytes      nattch     status      
-
------- Semaphore Arrays --------
-key        semid      owner      perms      nsems     
-
-gab@raspberrypi:~/projekt $ ps
-    PID TTY          TIME CMD
- 177201 pts/0    00:00:00 bash
- 178891 pts/0    00:00:00 ps
-
-```
-
----
-
-## 🔧 Parametry dostosowane do limitów systemowych
-
-Dla systemu z limitami (w moim przypadku wynoszące tyle):
-- `max user processes = 2528`
-- `open files = 1024`
-
-### Bezpieczne maksimum:
-
-```bash
-./main 20 100 50 2 1000
-```
-
-**Procesy:** ~1222 (20 drivers + 1 cashier + 1 dispatcher + 1000 passengers + ~200 dzieci)
-
-### Zalecane testy:
-
-```bash
-# Mały (szybki)
-./main 2 10 5 3 20
-
-# Średni (typowy)
-./main 3 20 10 5 50
-
-# Duży (stabilność)
-./main 5 50 20 4 100
-```
-
-## 🐛 Rozwiązywanie problemów
-
-### Problem: Program się nie kończy
-
-**Rozwiązanie:**
-```bash
-# Ctrl+C w terminalu lub:
-pkill -SIGINT main
-```
-
-### Problem: Pozostałe zasoby IPC po błędnym zakończeniu
-
-**Rozwiązanie:**
-```bash
-ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
-make clean
-```
-
-### Problem: "Permission denied" przy kompilacji
-
-**Rozwiązanie:**
-```bash
-chmod +x *.c
-make clean
-make
-```
-
-### Problem: Zbyt wiele procesów
-
-**Rozwiązanie:** Zmniejsz parametr `TOTAL` lub zwiększ system limit:
-```bash
-ulimit -u 4096
-```
----
-## 🔗 Linki do Kluczowych Fragmentów Kodu
-
-### a. Tworzenie i obsługa plików
-
-Wykorzystanie `open()`, `write()`, `close()` do logowania zdarzeń:
-
-**driver.c**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L29-L41
-
----
-
-### b. Tworzenie procesów
-
-Podstawa architektury - `fork()` + `exec()`:
-
-**main.c**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L261-L306
-
-
----
-
-
-### d. Obsługa sygnałów
-
-**dispatcher.c - Handler SIGINT**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/dispatcher.c#L39-L56
-
-**driver.c - Handler SIGUSR1**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L71-L74
-
-**main.c - Rejestracja handlera**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L243-L250
-
----
-
-### e. Synchronizacja procesów (semafory)
-
-**driver.c - Operacje semaforowe**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L43-L69
-
-**main.c - Inicjalizacja semaforów**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L196-L222
-
----
-
-### f. Łącza nazwane i nienazwane (pipe)
-
-**passenger.c - Synchronizacja rodzic-dziecko**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/passenger.c#L206-L243
-
----
-
-### g. Segmenty pamięci dzielonej
-
-**main.c - Tworzenie i inicjalizacja**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L182-L194
-
-
-**ipc.h - Struktura pamięci dzielonej (linie 12-24)**
-```c
-struct BusState {
-    int P;                    // Pojemność pasażerów
-    int R;                    // Pojemność rowerów
-    int T;                    // Czas oczekiwania
-    int N;                    // Liczba autobusów
-    int passengers;           // Aktualna liczba w autobusie
-    int bikes;                // Aktualna liczba rowerów
-    int departing;            // Flaga odjazdu
-    int station_blocked;      // Flaga blokady dworca
-    int active_passengers;    // Liczba aktywnych procesów
-    pid_t driver_pid;         // PID kierowcy na dworcu
-    int shutdown;             // Flaga shutdown
-};
-```
-
-**main.c - Usuwanie pamięci**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L46-L49
-
----
-
-### h. Kolejki komunikatów
-
-**main.c - Tworzenie kolejki**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L223-L229
-
-**ipc.h - Struktura wiadomości (linie 26-33)**
-```c
-struct msg {
-    long type;        // Typ: REGISTER lub PID pasażera
-    pid_t pid;        // PID pasażera
-    int vip;          // Czy VIP (0/1)
-    int bike;         // Czy rower (0/1)
-    int child;        // Czy dziecko (0/1)
-    int ticket_ok;    // Czy bilet OK (0/1)
-};
-```
-
-**passenger.c - Wysyłanie zapytania**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/passenger.c#L125-L135
-
-**cashier.c - Odbieranie i odpowiedź**
-
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/cashier.c#L71-L112
-
-
----
-
-
 
 ## 👤 Autor
 
-Gabriela Pater
+Gabriela Pater  
 Projekt na zajęcia z Systemów Operacyjnych
 
 ---
 
-**Uwaga:** Program wymaga uprawnień do tworzenia zasobów IPC. W przypadku problemów sprawdź limity systemowe (`ulimit -a`) i uprawnienia użytkownika.
+**Uwaga:** Program wymaga uprawnień do tworzenia zasobów IPC. W przypadku problemów sprawdź uprawnienia użytkownika i dostępność zasobów systemowych.
