@@ -1,34 +1,31 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -pedantic -std=c99 -D_POSIX_C_SOURCE=200809L
-LDFLAGS = -lpthread
-
-TARGETS = main driver cashier dispatcher passenger
+CFLAGS = -Wall -Wextra -std=c99 -D_POSIX_C_SOURCE=200809L
+TARGETS = main driver cashier dispatcher passenger passenger_generator
 
 all: $(TARGETS)
 
 main: main.c ipc.h
-        $(CC) $(CFLAGS) -o main main.c $(LDFLAGS)
+        $(CC) $(CFLAGS) -o main main.c
 
 driver: driver.c ipc.h
-        $(CC) $(CFLAGS) -o driver driver.c $(LDFLAGS)
+        $(CC) $(CFLAGS) -o driver driver.c
 
 cashier: cashier.c ipc.h
-        $(CC) $(CFLAGS) -o cashier cashier.c $(LDFLAGS)
+        $(CC) $(CFLAGS) -o cashier cashier.c
 
 dispatcher: dispatcher.c ipc.h
-        $(CC) $(CFLAGS) -o dispatcher dispatcher.c $(LDFLAGS)
+        $(CC) $(CFLAGS) -o dispatcher dispatcher.c
 
 passenger: passenger.c ipc.h
-        $(CC) $(CFLAGS) -o passenger passenger.c $(LDFLAGS)
+        $(CC) $(CFLAGS) -o passenger passenger.c
+
+passenger_generator: passenger_generator.c ipc.h
+        $(CC) $(CFLAGS) -o passenger_generator passenger_generator.c
 
 clean:
         rm -f $(TARGETS) report.txt *.key
-        ipcrm -a 2>/dev/null || true
+        ipcs -m | grep $(USER) | awk '{print $$2}' | xargs -r ipcrm -m
+        ipcs -s | grep $(USER) | awk '{print $$2}' | xargs -r ipcrm -s
+        ipcs -q | grep $(USER) | awk '{print $$2}' | xargs -r ipcrm -q
 
-run: all
-        ./main 2 10 5 3 20
-
-test: all
-        ./main 1 5 2 2 10
-
-.PHONY: all clean run test
+.PHONY: all clean

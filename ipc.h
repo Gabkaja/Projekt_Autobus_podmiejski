@@ -7,20 +7,25 @@
 #define SEM_PATH "bus_sem.key"
 #define MSG_PATH "bus_msg.key"
 
-#define REGISTER 1
+#define MSG_REGISTER 1
+#define MSG_TICKET_REPLY 2
 
 struct BusState {
-    int P;
-    int R;
-    int T;
-    int N;
-    int passengers;
-    int bikes;
-    int departing;
-    int station_blocked;
-    int active_passengers;
-    pid_t driver_pid;
-    int shutdown;
+    int P;                      // Maksymalna liczba pasażerów
+    int R;                      // Maksymalna liczba rowerów
+    int T;                      // Czas oczekiwania na dworcu
+    int N;                      // Liczba autobusów
+    int passengers;             // Aktualna liczba pasażerów w autobusie
+    int bikes;                  // Aktualna liczba rowerów w autobusie
+    int departing;              // Flaga: autobus odjeżdża
+    int station_blocked;        // Flaga: dworzec zablokowany
+    int active_passengers;      // Liczba aktywnych pasażerów w systemie
+    int total_passengers;       // Całkowita liczba pasażerów do obsłużenia
+    int boarded_passengers;     // Liczba pasażerów, którzy weszli do autobusu
+    pid_t driver_pid;           // PID aktualnego kierowcy na dworcu
+    int shutdown;               // Flaga: system się wyłącza
+    int cashier_done;           // Flaga: kasa zakończyła pracę
+    int generator_done;         // Flaga: generator zakończył tworzenie pasażerów
 };
 
 struct msg {
