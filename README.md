@@ -210,6 +210,14 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** Pierwsze 10 osób wchodzi, reszta dostaje "Brak miejsca"
 
+**Rezultat:** zgodnie z oczekiwaniami - nadprogramowe osoby dostają "Brak miejsca"
+
+```txt
+[18:42:01] [KASA] Rejestracja PID 180677 VIP 0 DZIECKO 0
+[18:42:01] [KASA] Rejestracja PID 180678 VIP 0 DZIECKO 0
+[18:42:00] [PASAZER 180677] Brak miejsca
+[18:42:00] [PASAZER 180678] Brak miejsca
+```
 ---
 
 ### Test 2: Wymuszenie odjazdu (SIGUSR1)
@@ -222,6 +230,12 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** W logach pojawia się "[DYSPOZYTOR] Wymuszenie odjazdu" przed upływem pełnych 10s
 
+**Rezultat:** zgodnie z oczekiwaniami
+
+```txt
+[18:36:35] [KIEROWCA 180132] Odjazd: 4 pasazerow, 3 rowerow
+[18:36:35] [DYSPOZYTOR] Wymuszenie odjazdu
+```
 ---
 
 ### Test 3: Blokada dworca (SIGUSR2)
@@ -234,6 +248,14 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** Po ~10s komunikaty "Blokada dworca", kasa i kierowcy kończą pracę
 
+**Rezulatat:** zgodnie z założeniem: komunikaty się pojawiają, a symulacja się kończy
+
+```txt
+[18:26:50] [DYSPOZYTOR] Blokada dworca
+[18:26:50] [KIEROWCA 179213] Blokada dworca
+[18:26:50] [DYSPOZYTOR] Koniec pracy
+[18:26:50] [KIEROWCA 179213] Koniec pracy
+```
 ---
 
 ### Test 4: Obsługa pasażerów VIP
@@ -258,6 +280,12 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** Logi zawierają "[DZIECKO ...] Bez opiekuna"
 
+**Rezultat:** zgodnie z oczekiwaniami, log z informacją o czecku bez opiekuna pojawia się:
+
+```txt
+[18:26:47] [DZIECKO 179234] Bez opiekuna
+```
+
 ---
 
 ### Test 6: Stress test (bez sleep)
@@ -270,6 +298,31 @@ ipcrm -a  # usuwa wszystkie zasoby IPC użytkownika
 
 **Oczekiwany wynik:** Brak deadlocków, wszystkie procesy kończą się poprawnie, synchronizacja działa
 
+**Rezultat:**
+brak deadlocków, brak zagłodzenia procesów, wszystkie procesy zakończyły działanie poprawnie, semafory i pamięć współdzielona działały poprawnie
+
+Fragment logów: 
+
+```txt
+[18:11:37] [KIEROWCA 177739] Odjazd: 50 pasazerow, 20 rowerow
+[18:11:37] [KIEROWCA 177739] Powrot po 9s
+[18:11:37] [KIEROWCA 177740] Autobus na dworcu
+[18:11:38] [DYSPOZYTOR] Wymuszenie odjazdu
+[18:11:38] [KIEROWCA 177740] Odjazd: 0 pasazerow, 0 rowerow
+[18:11:38] [KIEROWCA 177740] Powrot po 4s
+[18:11:38] [KIEROWCA 177741] Autobus na dworcu
+[18:11:42] [KIEROWCA 177741] Odjazd: 0 pasazerow, 0 rowerow
+[18:11:42] [KIEROWCA 177741] Powrot po 8s
+[18:11:42] [KIEROWCA 177743] Autobus na dworcu
+[18:11:43] [DYSPOZYTOR] Blokada dworca
+[18:11:43] [KIEROWCA 177743] Blokada dworca
+[18:11:43] [DYSPOZYTOR] Koniec pracy
+[18:11:43] [KIEROWCA 177743] Koniec pracy
+[18:11:43] [KIEROWCA 177739] Koniec pracy
+[18:11:43] [KIEROWCA 177740] Koniec pracy
+[18:11:43] [KIEROWCA 177742] Koniec pracy
+[18:11:43] [KIEROWCA 177741] Koniec pracy
+```
 ---
 
 ### Test 7: Sprzątanie zasobów IPC
@@ -285,6 +338,27 @@ ipcs -q  # kolejki komunikatów
 ```
 
 **Oczekiwany wynik:** Brak pozostałości po symulacji w systemie
+
+**Rezultat:** zgodnie z oczekiwaniami - brak pozostałości
+
+```txt
+gab@raspberrypi:~/projekt $ ipcs
+
+------ Message Queues --------
+key        msqid      owner      perms      used-bytes   messages    
+
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+
+------ Semaphore Arrays --------
+key        semid      owner      perms      nsems     
+
+gab@raspberrypi:~/projekt $ ps
+    PID TTY          TIME CMD
+ 177201 pts/0    00:00:00 bash
+ 178891 pts/0    00:00:00 ps
+
+```
 
 ---
 
@@ -357,7 +431,7 @@ Wykorzystanie `open()`, `write()`, `close()` do logowania zdarzeń:
 
 **driver.c**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L29C1-L41C2
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L29-L41
 
 ---
 
@@ -367,7 +441,7 @@ Podstawa architektury - `fork()` + `exec()`:
 
 **main.c**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L261C1-L306C6
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L261-L306
 
 
 ---
@@ -377,15 +451,15 @@ https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5
 
 **dispatcher.c - Handler SIGINT**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/dispatcher.c#L39C1-L56C2
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/dispatcher.c#L39-L56
 
 **driver.c - Handler SIGUSR1**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L71C1-L74C2
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L71-L74
 
 **main.c - Rejestracja handlera**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L243C5-L250C6
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L243-L250
 
 ---
 
@@ -393,11 +467,11 @@ https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5
 
 **driver.c - Operacje semaforowe**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L43C1-L69C2
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/driver.c#L43-L69
 
 **main.c - Inicjalizacja semaforów**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L196C4-L222C6
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L196-L222
 
 ---
 
@@ -405,7 +479,7 @@ https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5
 
 **passenger.c - Synchronizacja rodzic-dziecko**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/passenger.c#L206C3-L243C14
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/passenger.c#L206-L243
 
 ---
 
@@ -413,7 +487,7 @@ https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5
 
 **main.c - Tworzenie i inicjalizacja**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L182C1-L194C6
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L182-L194
 
 
 **ipc.h - Struktura pamięci dzielonej (linie 12-24)**
@@ -435,7 +509,7 @@ struct BusState {
 
 **main.c - Usuwanie pamięci**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L46C1-L49C6
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L46-L49
 
 ---
 
@@ -443,7 +517,7 @@ https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5
 
 **main.c - Tworzenie kolejki**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L223C1-L229C6
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/main.c#L223-L229
 
 **ipc.h - Struktura wiadomości (linie 26-33)**
 ```c
@@ -459,11 +533,11 @@ struct msg {
 
 **passenger.c - Wysyłanie zapytania**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/passenger.c#L125C4-L135C6
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/passenger.c#L125-L135
 
 **cashier.c - Odbieranie i odpowiedź**
 
-https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/cashier.c#L71C1-L112C6
+https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/7d8c3b4949de56cdc9be5be789c8596f7732f9d6/cashier.c#L71-L112
 
 
 ---
