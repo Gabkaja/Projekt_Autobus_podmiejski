@@ -134,21 +134,10 @@ int main() {
         int sb = bus->station_blocked;
         int sd = bus->shutdown;
         int wait_time = bus->T;
-        int boarded = bus->boarded_passengers;
-        int total = bus->total_passengers;
-        int cashier_done = bus->cashier_done;
-        int gen_done = bus->generator_done;
-        int active = bus->active_passengers;
         sem_unlock();
 
-        // Warunki zakończenia pracy
+        // Kończymy TYLKO gdy shutdown lub station_blocked
         if (sd || sb) {
-            gate_unlock(3);
-            break;
-        }
-
-        // Auto-shutdown: generator i kasa skończyli, wszyscy pasażerowie obsłużeni
-        if (gen_done && cashier_done && active == 0 && boarded >= total) {
             gate_unlock(3);
             break;
         }
@@ -166,31 +155,17 @@ int main() {
             sem_lock();
             sd = bus->shutdown;
             sb = bus->station_blocked;
-            gen_done = bus->generator_done;
-            cashier_done = bus->cashier_done;
-            active = bus->active_passengers;
-            boarded = bus->boarded_passengers;
             sem_unlock();
 
             if (sd || sb) break;
-            if (gen_done && cashier_done && active == 0 && boarded >= total) break;
         }
 
         sem_lock();
         sd = bus->shutdown;
         sb = bus->station_blocked;
-        gen_done = bus->generator_done;
-        cashier_done = bus->cashier_done;
-        active = bus->active_passengers;
-        boarded = bus->boarded_passengers;
         sem_unlock();
 
         if (sd || sb) {
-            gate_unlock(3);
-            break;
-        }
-
-        if (gen_done && cashier_done && active == 0 && boarded >= total) {
             gate_unlock(3);
             break;
         }
@@ -228,16 +203,16 @@ int main() {
         int Ti = (rand() % 7) + 3;
         sleep(Ti);
 
+        ts(b, sizeof(b));
+        snprintf(ln, sizeof(ln), "[%s] [KIEROWCA %d] Powrot po %ds\n", b, getpid(), Ti);
+        log_write(ln);
+
         sem_lock();
         sd = bus->shutdown;
         sb = bus->station_blocked;
         sem_unlock();
 
         if (sd || sb) break;
-
-        ts(b, sizeof(b));
-        snprintf(ln, sizeof(ln), "[%s] [KIEROWCA %d] Powrot po %ds\n", b, getpid(), Ti);
-        log_write(ln);
     }
 
     ts(b, sizeof(b));

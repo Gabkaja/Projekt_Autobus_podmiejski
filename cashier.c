@@ -73,23 +73,21 @@ int main() {
 
     int no_msg_count = 0;
     for (;;) {
+        // NAJPIERW sprawdzamy shutdown PRZED odbieraniem wiadomości
+        sem_lock();
+        int sd = bus->shutdown;
+        sem_unlock();
+
+        if (sd) {
+            break;
+        }
+
         struct msg m;
         ssize_t r = msgrcv(msgid, &m, sizeof(m) - sizeof(long), MSG_REGISTER, IPC_NOWAIT);
 
         if (r < 0) {
             if (errno == ENOMSG) {
                 no_msg_count++;
-
-                sem_lock();
-                int sd = bus->shutdown;
-                int gen_done = bus->generator_done;
-                int active = bus->active_passengers;
-                sem_unlock();
-
-                // Kończymy gdy system się wyłącza lub generator skończył i nie ma aktywnych pasażerów
-                if (sd || (gen_done && active == 0)) {
-                    break;
-                }
 
                 if (no_msg_count > 100) {
                     sleep(1);
@@ -110,20 +108,16 @@ int main() {
                  b, m.pid, m.vip, m.child);
         log_write(ln);
 
-        // Wysyłamy bilet tylko dla nie-VIP
+        // Wysyłamy bilet tylko dla nie-VIP dorosłych (nie dzieci)
         if (!m.vip && !m.child) {
             m.ticket_ok = 1;
-            m.type = MSG_TICKET_REPLY + m.pid; // Unikalny typ dla każdego pasażera
+            m.type = MSG_TICKET_REPLY + m.pid;
             if (msgsnd(msgid, &m, sizeof(m) - sizeof(long), 0) == -1) {
                 perror("msgsnd reply");
             }
         }
+        // VIP i dzieci nie dostają osobnych biletów (dzieci wchodzą z rodzicem)
     }
-
-    // Oznaczamy że kasa zakończyła pracę
-    sem_lock();
-    bus->cashier_done = 1;
-    sem_unlock();
 
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln), "[%s] [KASA] Koniec pracy\n", b);

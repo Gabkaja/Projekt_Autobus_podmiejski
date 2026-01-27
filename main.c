@@ -84,13 +84,12 @@ void handle_sigchld(int sig) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 6) {
-        fprintf(stderr, "Uzycie: %s N P R T TOTAL\n", argv[0]);
+    if (argc < 5) {
+        fprintf(stderr, "Uzycie: %s N P R T\n", argv[0]);
         fprintf(stderr, "  N - liczba autobusow\n");
         fprintf(stderr, "  P - maksymalna liczba pasazerow w autobusie\n");
         fprintf(stderr, "  R - maksymalna liczba rowerow w autobusie\n");
         fprintf(stderr, "  T - czas oczekiwania na dworcu (sekundy)\n");
-        fprintf(stderr, "  TOTAL - calkowita liczba pasazerow\n");
         return EXIT_FAILURE;
     }
 
@@ -98,9 +97,8 @@ int main(int argc, char** argv) {
     int P = atoi(argv[2]);
     int R = atoi(argv[3]);
     int T = atoi(argv[4]);
-    int TOTAL = atoi(argv[5]);
 
-    if (N <= 0 || P <= 0 || R < 0 || T <= 0 || TOTAL <= 0) {
+    if (N <= 0 || P <= 0 || R < 0 || T <= 0) {
         fprintf(stderr, "Niepoprawne parametry\n");
         return EXIT_FAILURE;
     }
@@ -174,12 +172,9 @@ int main(int argc, char** argv) {
     bus->departing = 0;
     bus->station_blocked = 0;
     bus->active_passengers = 0;
-    bus->total_passengers = TOTAL;
     bus->boarded_passengers = 0;
     bus->driver_pid = 0;
     bus->shutdown = 0;
-    bus->cashier_done = 0;
-    bus->generator_done = 0;
 
     // Obsługa sygnałów
     struct sigaction sa;
@@ -199,8 +194,8 @@ int main(int argc, char** argv) {
     char b[64];
     ts(b, sizeof(b));
     char ln[256];
-    snprintf(ln, sizeof(ln), "[%s] [MAIN] Start systemu: N=%d P=%d R=%d T=%d TOTAL=%d\n", 
-             b, N, P, R, T, TOTAL);
+    snprintf(ln, sizeof(ln), "[%s] [MAIN] Start systemu: N=%d P=%d R=%d T=%d\n", 
+             b, N, P, R, T);
     log_write(ln);
 
     // Tworzenie kierowców (N autobusów)
@@ -245,9 +240,7 @@ int main(int argc, char** argv) {
         perror("fork generator");
     }
     else if (p3 == 0) {
-        char total_str[32];
-        snprintf(total_str, sizeof(total_str), "%d", TOTAL);
-        execl("./passenger_generator", "passenger_generator", total_str, NULL);
+        execl("./passenger_generator", "passenger_generator", NULL);
         perror("exec passenger_generator");
         _exit(1);
     }

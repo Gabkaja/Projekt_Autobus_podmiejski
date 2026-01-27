@@ -51,16 +51,8 @@ void handle_sigchld(int sig) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        fprintf(stderr, "Uzycie: %s TOTAL\n", argv[0]);
-        return 1;
-    }
-
-    int TOTAL = atoi(argv[1]);
-    if (TOTAL <= 0) {
-        fprintf(stderr, "Niepoprawna liczba pasazerow\n");
-        return 1;
-    }
+    (void)argc;
+    (void)argv;
 
     key_t shm_key = ftok(SHM_PATH, 'S');
     key_t sem_key = ftok(SEM_PATH, 'E');
@@ -83,7 +75,8 @@ int main(int argc, char** argv) {
         perror("shmat");
         return 1;
     }
-        struct sigaction sa_chld;
+
+    struct sigaction sa_chld;
     memset(&sa_chld, 0, sizeof(sa_chld));
     sa_chld.sa_handler = handle_sigchld;
     sigemptyset(&sa_chld.sa_mask);
@@ -91,15 +84,16 @@ int main(int argc, char** argv) {
     if (sigaction(SIGCHLD, &sa_chld, NULL) == -1) {
         perror("sigaction SIGCHLD");
     }
+
     char b[64];
     ts(b, sizeof(b));
     char ln[128];
-    snprintf(ln, sizeof(ln), "[%s] [GENERATOR] Start - utworzy %d pasazerow\n", b, TOTAL);
+    snprintf(ln, sizeof(ln), "[%s] [GENERATOR] Start - tworzy pasazerow w nieskonczonosc\n", b);
     log_write(ln);
 
     srand((unsigned)time(NULL));
 
-    for (int i = 0; i < TOTAL; i++) {
+    for (;;) {
         // Losowy odstęp 1-3 sekundy
         int delay = 1 + (rand() % 3);
         sleep(delay);
@@ -131,20 +125,10 @@ int main(int argc, char** argv) {
             perror("exec passenger");
             _exit(1);
         }
-
     }
-    while (wait(NULL) > 0) {
-        if (errno == ECHILD) {
-            break;
-        }
-    }
-    // Oznaczamy że generator skończył pracę
-    sem_lock();
-    bus->generator_done = 1;
-    sem_unlock();
 
     ts(b, sizeof(b));
-    snprintf(ln, sizeof(ln), "[%s] [GENERATOR] Koniec - utworzono wszystkich pasazerow\n", b);
+    snprintf(ln, sizeof(ln), "[%s] [GENERATOR] Koniec pracy\n", b);
     log_write(ln);
 
     shmdt(bus);

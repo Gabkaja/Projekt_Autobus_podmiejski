@@ -53,8 +53,10 @@ void gate_unlock(int gate) {
 }
 
 int try_board(int bike, int with_child, int vip) {
-    (void)vip; // Może być użyte w przyszłości dla priorytetów
+    (void)vip;
     int gate = bike ? 2 : 1;
+    
+    // ATOMOWA operacja: lock gate -> sprawdź warunki -> wsiądź/odrzuć -> unlock
     gate_lock(gate);
 
     sem_lock();
@@ -65,10 +67,10 @@ int try_board(int bike, int with_child, int vip) {
     int bks = bus->bikes;
     int P = bus->P;
     int R = bus->R;
-    sem_unlock();
 
-    // Nie możemy wsiąść
-    if (sd || sb || dep) {
+    // Nie możemy wsiąść - system zamknięty lub autobus odjeżdża
+    if (sd || sb) {
+        sem_unlock();
         gate_unlock(gate);
         return 0; // System się wyłącza - kończymy proces
     }
@@ -77,13 +79,13 @@ int try_board(int bike, int with_child, int vip) {
     int needed_seats = with_child ? 2 : 1;
     int needed_bikes = bike ? 1 : 0;
 
-    if (pass + needed_seats > P || bks + needed_bikes > R) {
+    if (pass + needed_seats > P || bks + needed_bikes > R || dep) {
+        sem_unlock();
         gate_unlock(gate);
         return -1; // Brak miejsca - czekamy na następny autobus
     }
 
-    // Wchodzimy
-    sem_lock();
+    // Wchodzimy - ATOMOWO
     bus->passengers += needed_seats;
     bus->bikes += needed_bikes;
     sem_unlock();
@@ -170,6 +172,23 @@ int main() {
     m.child = 0;
     m.ticket_ok = vip ? 1 : 0;
 
+    // Sprawdź shutdown przed wysłaniem
+    sem_lock();
+    sd = bus->shutdown;
+    sb = bus->station_blocked;
+    sem_unlock();
+
+    if (sd || sb) {
+        ts(b, sizeof(b));
+        snprintf(ln, sizeof(ln), "[%s] [PASAZER %d] Dworzec zamkniety przed rejestracją\n", b, getpid());
+        log_write(ln);
+        sem_lock();
+        bus->active_passengers--;
+        sem_unlock();
+        shmdt(bus);
+        return 0;
+    }
+
     if (msgsnd(msgid, &m, sizeof(m) - sizeof(long), 0) == -1) {
         perror("msgsnd register");
     }
@@ -179,7 +198,7 @@ int main() {
         int got_ticket = 0;
         int no_msg_count = 0;
 
-        for (int attempts = 0; attempts < 10000; attempts++) {
+        for (;;) {
             long ticket_type = MSG_TICKET_REPLY + getpid();
             ssize_t rr = msgrcv(msgid, &m, sizeof(m) - sizeof(long), ticket_type, IPC_NOWAIT);
             
@@ -238,23 +257,14 @@ int main() {
             sem_unlock();
         }
         else if (cpid == 0) {
-            // Proces dziecka
+            // Proces dziecka - NIE rejestruje się w kasie, tylko czeka na rodzica
             close(pipefd[1]);
-
-            struct msg cm;
-            cm.type = MSG_REGISTER;
-            cm.pid = getpid();
-            cm.vip = vip;
-            cm.bike = 0;
-            cm.child = 1;
-            cm.ticket_ok = 1;
-            msgsnd(msgid, &cm, sizeof(cm) - sizeof(long), 0);
 
             char bufc;
             read(pipefd[0], &bufc, 1);
             close(pipefd[0]);
 
-            // Dziecko wchodzi przez bramkę bez roweru
+            // Dziecko wchodzi przez bramkę bez roweru (synchronicznie z rodzicem)
             gate_lock(1);
             gate_unlock(1);
 
@@ -291,7 +301,8 @@ int main() {
                     waitpid(cpid, NULL, 0);
 
                     ts(b, sizeof(b));
-                    snprintf(ln, sizeof(ln), "[%s] [DOROSLY+DZIECKO %d] Wsiadl\n", b, getpid());
+                    snprintf(ln, sizeof(ln), "[%s] [DOROSLY+DZIECKO %d] Wsiadl (VIP=%d rower=%d)\n", 
+                             b, getpid(), vip, bike);
                     log_write(ln);
 
                     sem_lock();
@@ -341,7 +352,8 @@ int main() {
         if (result == 1) {
             // Sukces
             ts(b, sizeof(b));
-            snprintf(ln, sizeof(ln), "[%s] [PASAZER %d] Wsiadl\n", b, getpid());
+            snprintf(ln, sizeof(ln), "[%s] [PASAZER %d] Wsiadl (VIP=%d rower=%d)\n", 
+                     b, getpid(), vip, bike);
             log_write(ln);
             sem_lock();
             bus->active_passengers--;
