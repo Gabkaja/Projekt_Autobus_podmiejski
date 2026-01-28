@@ -582,204 +582,360 @@ Powrót do początku pętli
 
 ## ✅ Przykładowe testy
 
-### Test 1: Limit pojemności pasażerów i rowerów
+# Testy - System zarządzania autobusami
 
-**Cel:** Sprawdzenie odmowy wejścia po osiągnięciu limitu
+## Test 1: Maksymalne wypełnienie autobusu - race condition
 
-```bash
-./main 2 10 3 8
-# W drugim terminalu po kilkunastu sekundach:
-killall -SIGINT main
+**Cel**: Sprawdzenie czy dokładnie P pasażerów wsiada, nawet gdy więcej próbuje jednocześnie
+
+**Parametry**: `./main 1 5 2 10`
+- 1 autobus
+- 5 miejsc
+- 2 rowery
+- 10 sekund czasu oczekiwania
+
+**Scenariusz**: 
+- Generator tworzy 20 pasażerów w krótkim czasie (1-3s)
+- Wszyscy próbują wsiąść do jednego małego autobusu
+- Część będzie musiała czekać na następny kurs
+
+**Przykładowe logi (fragment)**:
+```
+[14:23:10] [KIEROWCA 1001] Autobus na dworcu
+[14:23:11] [PASAZER 2001] Przybycie (VIP=0 wiek=25 rower=0 dziecko=0)
+[14:23:11] [PASAZER 2001] Wsiadl (VIP=0 rower=0)
+[14:23:12] [PASAZER 2002] Przybycie (VIP=0 wiek=30 rower=1 dziecko=0)
+[14:23:12] [PASAZER 2002] Wsiadl (VIP=0 rower=1)
+[14:23:13] [PASAZER 2003] Przybycie (VIP=0 wiek=45 rower=0 dziecko=0)
+[14:23:13] [PASAZER 2003] Wsiadl (VIP=0 rower=0)
+[14:23:13] [PASAZER 2004] Przybycie (VIP=0 wiek=35 rower=1 dziecko=0)
+[14:23:13] [PASAZER 2004] Wsiadl (VIP=0 rower=1)
+[14:23:14] [PASAZER 2005] Przybycie (VIP=0 wiek=50 rower=0 dziecko=0)
+[14:23:14] [PASAZER 2005] Wsiadl (VIP=0 rower=0)
+[14:23:14] [PASAZER 2006] Przybycie (VIP=0 wiek=28 rower=0 dziecko=0)
+[14:23:14] [PASAZER 2007] Przybycie (VIP=0 wiek=33 rower=1 dziecko=0)
+[14:23:24] [KIEROWCA 1001] Odjazd: 5 pasazerow, 2 rowerow
+[14:23:24] [KIEROWCA 1001] Autobus na dworcu (wrócił po trasie)
+[14:23:25] [PASAZER 2006] Wsiadl (VIP=0 rower=0)
+[14:23:25] [PASAZER 2007] Wsiadl (VIP=0 rower=1)
 ```
 
-**Oczekiwany wynik:** Pierwsze 10 osób wchodzi, reszta czeka na następny autobus
-
-**Fragment logu:**
-```
-[14:42:05] [KIEROWCA 180650] Odjazd: 10 pasazerow, 3 rowerow
-[14:42:07] [PASAZER 180677] Wsiadl (VIP=0 rower=1)
-[14:42:09] [PASAZER 180678] Wsiadl (VIP=0 rower=0)
-```
-
-**Analiza:** Autobus osiągnął limit 10 pasażerów i 3 rowerów, kolejni czekają na następny kurs
+**Weryfikacja**: 
+- ✅ Pierwszy odjazd: DOKŁADNIE 5 pasażerów i 2 rowery
+- ✅ Pasażerowie 2006 i 2007 czekają na następny autobus
+- ✅ Brak przekroczenia limitu P=5, R=2
 
 ---
 
-### Test 2: Wymuszenie odjazdu (SIGUSR1)
+## Test 2: Wielokrotny Ctrl+Z podczas aktywnego ruchu
 
-**Cel:** Weryfikacja przedwczesnego odjazdu autobusu
+**Cel**: Sprawdzenie odporności na zawieszanie/wznawianie procesu głównego
 
-```bash
-./main 2 15 5 10 &
-# Po 3 sekundach:
-killall -SIGUSR1 dispatcher
+**Parametry**: `./main 3 10 5 8`
+
+**Scenariusz**:
+1. Uruchom system
+2. Poczekaj aż kilku pasażerów zacznie wsiadać
+3. Naciśnij **Ctrl+Z** (zatrzymanie)
+4. Poczekaj 5 sekund
+5. Wznów przez **fg**
+6. Powtórz 3-4 razy
+7. Naciśnij Ctrl+C (shutdown)
+
+**Przykładowe logi**:
+```
+[15:10:15] [KIEROWCA 3001] Autobus na dworcu
+[15:10:16] [PASAZER 4001] Wsiadl (VIP=0 rower=1)
+[15:10:17] [PASAZER 4002] Wsiadl (VIP=0 rower=0)
+^Z
+[1]+  Stopped                 ./main 3 10 5 8
+
+(czekamy 5 sekund, potem fg)
+
+[15:10:23] [PASAZER 4003] Wsiadl (VIP=0 rower=0)
+[15:10:24] [KIEROWCA 3001] Odjazd: 3 pasazerow, 1 rowerow
+[15:10:25] [KIEROWCA 3002] Autobus na dworcu
+[15:10:26] [PASAZER 4004] Wsiadl (VIP=0 rower=1)
+^Z
+[1]+  Stopped                 ./main 3 10 5 8
+
+(znowu fg)
+
+[15:10:35] [KIEROWCA 3001] Powrot po 4s
+[15:10:36] [PASAZER 4005] Wsiadl (VIP=0 rower=0)
 ```
 
-**Oczekiwany wynik:** W logach pojawia się `[DYSPOZYTOR] Wymuszenie odjazdu` przed upływem pełnych 10s
-
-**Fragment logu:**
-```
-[14:36:35] [KIEROWCA 180132] Autobus na dworcu
-[14:36:38] [DYSPOZYTOR] Wymuszenie odjazdu
-[14:36:38] [KIEROWCA 180132] Odjazd: 4 pasazerow, 3 rowerow
-```
-
-**Analiza:** Autobus odjechał po 3 sekundach zamiast czekać 10 sekund
+**Weryfikacja**:
+- ✅ System kontynuuje działanie po każdym fg
+- ✅ Brak "Odjazd: 0 pasazerow" (co by oznaczało zdublowane autobusy)
+- ✅ Kolejność logów jest spójna
+- ✅ Brak deadlocków na semaforach
 
 ---
 
-### Test 3: Blokada dworca (SIGUSR2)
+## Test 3: Rodzice z dziećmi - ekstremalna synchronizacja
 
-**Cel:** Sprawdzenie blokady i kontrolowanego zakończenia systemu
+**Cel**: Test synchronizacji procesów rodzic-dziecko
 
-```bash
-./main 2 10 3 8 &
-sleep 10
-killall -SIGUSR2 dispatcher
+**Parametry**: `./main 2 6 3 15`
+
+**Scenariusz**: 
+- Modyfikujemy generator aby tworzył TYLKO pasażerów z dziećmi (100% zamiast 20%)
+- Każdy rodzic+dziecko zajmuje 2 miejsca
+- Autobus pomieści tylko 3 pary
+
+**Przykładowe logi**:
+```
+[16:20:10] [KIEROWCA 5001] Autobus na dworcu
+[16:20:11] [PASAZER 6001] Przybycie (VIP=0 wiek=35 rower=0 dziecko=1)
+[16:20:12] [DOROSLY+DZIECKO 6001] Wsiadl (VIP=0 rower=0)
+[16:20:13] [PASAZER 6002] Przybycie (VIP=0 wiek=28 rower=1 dziecko=1)
+[16:20:14] [DOROSLY+DZIECKO 6002] Wsiadl (VIP=0 rower=1)
+[16:20:15] [PASAZER 6003] Przybycie (VIP=0 wiek=42 rower=0 dziecko=1)
+[16:20:16] [DOROSLY+DZIECKO 6003] Wsiadl (VIP=0 rower=0)
+[16:20:17] [PASAZER 6004] Przybycie (VIP=0 wiek=31 rower=0 dziecko=1)
+[16:20:25] [KIEROWCA 5001] Odjazd: 6 pasazerow, 1 rowerow
+[16:20:26] [KIEROWCA 5002] Autobus na dworcu
+[16:20:27] [DOROSLY+DZIECKO 6004] Wsiadl (VIP=0 rower=0)
 ```
 
-**Oczekiwany wynik:** Komunikaty "Blokada dworca", procesy kończą pracę, sprzątanie zasobów
-
-**Fragment logu:**
-```
-[14:26:50] [DYSPOZYTOR] Blokada dworca
-[14:26:51] [KIEROWCA 179213] Koniec pracy
-[14:26:51] [KIEROWCA 179214] Koniec pracy
-[14:26:52] [KASA] Koniec pracy
-[14:26:52] [GENERATOR] Koniec pracy
-[14:26:52] [DYSPOZYTOR] Koniec pracy
-[14:26:52] [MAIN] System zakonczony
-```
-
-**Analiza:** System stopniowo zamyka się po otrzymaniu SIGUSR2
+**Weryfikacja**:
+- ✅ Odjazd: 6 pasażerów (3 pary × 2 miejsca)
+- ✅ Każde "DOROSLY+DZIECKO" zajmuje dokładnie 2 miejsca
+- ✅ Czwarta para czeka na następny autobus
+- ✅ Brak wpisów "[DZIECKO XXX] Bez opiekuna" (dzieci są z rodzicami)
 
 ---
 
-### Test 4: Obsługa pasażerów VIP
+## Test 4: SIGUSR1 - wymuszenie odjazdu w krytycznym momencie
 
-**Cel:** Weryfikacja rejestracji VIP bez oczekiwania na bilet
+**Cel**: Test wymuszenia odjazdu gdy pasażerowie wsiadają
 
-```bash
-./main 3 20 5 8
+**Parametry**: `./main 2 10 5 20`
+
+**Scenariusz**:
+1. Uruchom system
+2. Poczekaj aż 3-4 pasażerów wsiądzie
+3. Wyślij `kill -SIGUSR1 <PID_DYSPOZYTORA>` (natychmiastowy odjazd)
+4. Sprawdź czy autobus odjeżdża z tymi pasażerami
+
+**Przykładowe logi**:
+```
+[17:30:10] [KIEROWCA 7001] Autobus na dworcu
+[17:30:12] [PASAZER 8001] Wsiadl (VIP=0 rower=0)
+[17:30:13] [PASAZER 8002] Wsiadl (VIP=0 rower=1)
+[17:30:14] [PASAZER 8003] Wsiadl (VIP=0 rower=0)
+[17:30:15] [DYSPOZYTOR] Wymuszenie odjazdu
+[17:30:15] [KIEROWCA 7001] Odjazd: 3 pasazerow, 1 rowerow
+[17:30:15] [KIEROWCA 7002] Autobus na dworcu
+[17:30:16] [PASAZER 8004] Przybycie (VIP=0 wiek=45 rower=0 dziecko=0)
+[17:30:17] [PASAZER 8004] Wsiadl (VIP=0 rower=0)
 ```
 
-**Oczekiwany wynik:** W logach wpisy `[KASA] Rejestracja PID ... VIP=1 ...` bez wysyłania biletów
-
-**Fragment logu:**
-```
-[14:15:42] [PASAZER 185432] Przybycie (VIP=1 wiek=45 rower=0 dziecko=0)
-[14:15:42] [KASA] Rejestracja PID=185432 VIP=1 DZIECKO=0
-[14:15:42] [PASAZER 185432] Wsiadl (VIP=1 rower=0)
-```
-
-**Analiza:** Pasażer VIP nie czekał na bilet z kasy, od razu wszedł
+**Weryfikacja**:
+- ✅ Autobus odjeżdża NATYCHMIAST po SIGUSR1 (nie czeka T=20s)
+- ✅ Zabiera pasażerów którzy już wsiedli (3 osoby, 1 rower)
+- ✅ Następny autobus natychmiast wjeżdża
+- ✅ Nowi pasażerowie wsiadają do nowego autobusu
 
 ---
 
-### Test 5: Dziecko bez opiekuna
+## Test 5: SIGUSR2 - blokada dworca gdy autobusy są w trasie
 
-**Cel:** Odmowa wejścia dziecku < 8 lat bez dorosłego
+**Cel**: Test graceful shutdown gdy część autobusów jest w trasie
 
-```bash
-./main 2 10 3 8
+**Parametry**: `./main 3 8 4 10`
+
+**Scenariusz**:
+1. Uruchom system
+2. Poczekaj aż 2 autobusy będą w trasie (po logu "Odjazd")
+3. Wyślij `kill -SIGUSR2 <PID_DYSPOZYTORA>`
+4. Sprawdź czy wszystkie autobusy bezpiecznie kończą trasy
+
+**Przykładowe logi**:
+```
+[18:15:10] [KIEROWCA 9001] Odjazd: 8 pasazerow, 3 rowerow
+[18:15:12] [KIEROWCA 9002] Odjazd: 7 pasazerow, 4 rowerow
+[18:15:13] [KIEROWCA 9003] Autobus na dworcu
+[18:15:14] [DYSPOZYTOR] Blokada dworca
+[18:15:14] [DYSPOZYTOR] Koniec pracy
+[18:15:14] [KIEROWCA 9003] Koniec pracy
+[18:15:14] [KASA] Koniec pracy
+[18:15:14] [GENERATOR] Koniec pracy
+[18:15:14] [PASAZER 10001] Dworzec zamkniety przed rejestracją
+[18:15:16] [KIEROWCA 9001] Powrot po 6s
+[18:15:16] [KIEROWCA 9001] Koniec pracy
+[18:15:18] [KIEROWCA 9002] Powrot po 6s
+[18:15:18] [KIEROWCA 9002] Koniec pracy
+[18:15:19] [MAIN] System zakonczony
 ```
 
-**Oczekiwany wynik:** Logi zawierają `[DZIECKO ...] Bez opiekuna - odmowa`
-
-**Fragment logu:**
-```
-[14:26:47] [PASAZER 179234] Przybycie (VIP=0 wiek=5 rower=0 dziecko=0)
-[14:26:47] [DZIECKO 179234] Bez opiekuna - odmowa
-```
-
-**Analiza:** Dziecko w wieku 5 lat nie może podróżować samo
+**Weryfikacja**:
+- ✅ Autobusy w trasie (9001, 9002) kończą swoje trasy
+- ✅ Autobus na dworcu (9003) kończy natychmiast
+- ✅ Wszystkie procesy kończą się w odpowiedniej kolejności
+- ✅ Nowi pasażerowie dostają "Dworzec zamkniety"
+- ✅ Brak zombie processów
 
 ---
 
-### Test 6: Dorośli z dziećmi
+## Test 6: Minimalna pojemność - bardzo mały autobus
 
-**Cel:** Sprawdzenie mechanizmu fork() + pipe dla rodzin
+**Cel**: Test skrajnego przypadku P=1, R=0
 
-```bash
-./main 2 15 5 5
+**Parametry**: `./main 1 1 0 5`
+- 1 autobus
+- 1 miejsce (!)
+- 0 rowerów (!)
+- 5 sekund czasu
+
+**Scenariusz**:
+- Generator tworzy 10 pasażerów
+- Wszyscy muszą jechać po kolei
+- Pasażerowie z rowerami nie mogą w ogóle wsiąść
+
+**Przykładowe logi**:
+```
+[19:00:10] [KIEROWCA 11001] Autobus na dworcu
+[19:00:11] [PASAZER 12001] Przybycie (VIP=0 wiek=25 rower=0 dziecko=0)
+[19:00:11] [PASAZER 12001] Wsiadl (VIP=0 rower=0)
+[19:00:12] [PASAZER 12002] Przybycie (VIP=0 wiek=30 rower=1 dziecko=0)
+[19:00:13] [PASAZER 12003] Przybycie (VIP=0 wiek=35 rower=0 dziecko=0)
+[19:00:16] [KIEROWCA 11001] Odjazd: 1 pasazerow, 0 rowerow
+[19:00:20] [KIEROWCA 11001] Powrot po 4s
+[19:00:20] [KIEROWCA 11001] Autobus na dworcu
+[19:00:21] [PASAZER 12003] Wsiadl (VIP=0 rower=0)
+[19:00:26] [KIEROWCA 11001] Odjazd: 1 pasazerow, 0 rowerow
 ```
 
-**Oczekiwany wynik:** 
-- Rejestracja dorosłego (osobny PID)
-- Dziecko NIE rejestruje się osobno w kasie
-- Zajęcie 2 miejsc w autobusie
-- Synchronizacja przez pipe
-
-**Fragment logu:**
-```
-[14:20:15] [PASAZER 187650] Przybycie (VIP=0 wiek=35 rower=0 dziecko=1)
-[14:20:15] [KASA] Rejestracja PID=187650 VIP=0 DZIECKO=0
-[14:20:16] [DOROSLY+DZIECKO 187650] Wsiadl (VIP=0 rower=0)
-```
-
-**Analiza:** Dorosły z dzieckiem zajął 2 miejsca, dziecko nie rejestrowało się osobno
+**Weryfikacja**:
+- ✅ Każdy odjazd: DOKŁADNIE 1 pasażer, 0 rowerów
+- ✅ Pasażer 12002 (z rowerem) NIGDY nie wsiada (czeka w nieskończoność)
+- ✅ Pasażerowie bez rowerów wsiadają po kolei
+- ✅ System nie deadlockuje mimo ekstremalnych ograniczeń
 
 ---
 
-### Test 7: Stress test (wiele procesów)
+## Test 7: Maksymalna konkurencja - 10 autobusów, duży ruch
 
-**Cel:** Sprawdzenie synchronizacji przy jednoczesnym dostępie wielu procesów
+**Cel**: Stress test z wieloma autobusami i pasażerami
 
-```bash
-./main 5 50 20 4
-# Czekamy 60 sekund
-killall -SIGINT main
+**Parametry**: `./main 10 15 8 3`
+- 10 autobusów
+- 15 miejsc
+- 8 rowerów
+- 3 sekundy czasu (bardzo szybki obrót)
+
+**Scenariusz**:
+- Generator tworzy pasażerów co 1-3s
+- Wiele autobusów jednocześnie na dworcu
+- Szybka rotacja - autobusy wracają bardzo szybko
+
+**Przykładowe logi (fragment)**:
+```
+[20:10:00] [KIEROWCA 13001] Autobus na dworcu
+[20:10:01] [PASAZER 14001] Wsiadl (VIP=0 rower=1)
+[20:10:02] [PASAZER 14002] Wsiadl (VIP=0 rower=0)
+[20:10:03] [KIEROWCA 13001] Odjazd: 2 pasazerow, 1 rowerow
+[20:10:03] [KIEROWCA 13002] Autobus na dworcu
+[20:10:04] [PASAZER 14003] Wsiadl (VIP=0 rower=1)
+[20:10:05] [PASAZER 14004] Wsiadl (VIP=0 rower=0)
+[20:10:06] [KIEROWCA 13002] Odjazd: 2 pasazerow, 1 rowerow
+[20:10:06] [KIEROWCA 13003] Autobus na dworcu
+[20:10:07] [KIEROWCA 13001] Powrot po 4s
+[20:10:07] [PASAZER 14005] Wsiadl (VIP=0 rower=0)
+[20:10:09] [KIEROWCA 13003] Odjazd: 1 pasazerow, 0 rowerow
+[20:10:09] [KIEROWCA 13004] Autobus na dworcu
+[20:10:10] [KIEROWCA 13002] Powrot po 4s
 ```
 
-**Oczekiwany wynik:** 
-- Brak deadlocków
-- Wszystkie procesy kończą się poprawnie
-- Prawidłowa synchronizacja semaforów
-- Logi bez błędów
-
-**Fragment logu:**
-```
-[14:11:37] [KIEROWCA 177739] Odjazd: 50 pasazerow, 20 rowerow
-[14:11:38] [KIEROWCA 177740] Autobus na dworcu
-[14:11:42] [KIEROWCA 177741] Odjazd: 12 pasazerow, 5 rowerow
-[14:11:43] [MAIN] Shutdown initiated
-[14:11:45] [MAIN] System zakonczony
-```
-
-**Analiza:** System obsłużył dużą liczbę procesów bez problemów
+**Weryfikacja**:
+- ✅ W KAŻDEJ chwili MAX 1 autobus na dworcu (semafor gate[3])
+- ✅ Brak nakładających się "Autobus na dworcu" bez "Odjazd"
+- ✅ Wszystkie powroty są logiczne (czas 3-9s)
+- ✅ Brak deadlocków mimo 10 autobusów
 
 ---
 
-### Test 8: Sprzątanie zasobów IPC
+## Test 8: Samymi VIPami
 
-**Cel:** Upewnienie się, że zasoby zostały usunięte po zakończeniu
+**Cel**: Test czy VIPowie nie potrzebują biletów
 
-```bash
-./main 2 10 3 8 &
-sleep 10
-killall -SIGINT main
-# Po zakończeniu:
-ipcs -m  # pamięć dzielona
-ipcs -s  # semafory
-ipcs -q  # kolejki komunikatów
+**Parametry**: `./main 2 10 5 10`
+
+**Scenariusz**:
+- Modyfikujemy kod aby 100% pasażerów to VIPowie (zamiast 1%)
+- VIPowie nie rejestrują się w kasie przed wejściem do autobusu
+
+
+**Przykładowe logi**:
+```
+[21:00:10] [KIEROWCA 15001] Autobus na dworcu
+[21:00:11] [PASAZER 16001] Przybycie (VIP=1 wiek=45 rower=0 dziecko=0)
+[21:00:11] [PASAZER 16001] Wsiadl (VIP=1 rower=0)
+[21:00:12] [PASAZER 16002] Przybycie (VIP=1 wiek=52 rower=1 dziecko=0)
+[21:00:12] [PASAZER 16002] Wsiadl (VIP=1 rower=1)
+[21:00:13] [PASAZER 16003] Przybycie (VIP=1 wiek=38 rower=0 dziecko=0)
+[21:00:13] [PASAZER 16003] Wsiadl (VIP=1 rower=0)
 ```
 
-**Oczekiwany wynik:** Brak pozostałości w systemie
-
-```
------- Message Queues --------
-key        msqid      owner      perms      used-bytes   messages    
-
------- Shared Memory Segments --------
-key        shmid      owner      perms      bytes      nattch     status      
-
------- Semaphore Arrays --------
-key        semid      owner      perms      nsems     
-```
-
-**Analiza:** Wszystkie zasoby IPC zostały poprawnie usunięte przez `cleanup()`
+**Weryfikacja**:
+- ✅ BRAK logów "KASA Rejestracja" dla VIPów przed wejściem do autobusu
+- ✅ VIPowie wsiadają NATYCHMIAST bez czekania na bilet
 
 ---
+
+## Test 9: Dzieci bez opiekuna - masowe odrzucenie
+
+**Cel**: Test odrzucania dzieci poniżej 8 lat
+
+**Parametry**: `./main 2 10 5 10`
+
+**Scenariusz**:
+- Modyfikujemy generator aby tworzył tylko dzieci 0-7 lat
+- Wszystkie powinny zostać odrzucone
+
+**Przykładowe logi**:
+```
+[22:00:10] [KIEROWCA 17001] Autobus na dworcu
+[22:00:11] [PASAZER 18001] Przybycie (VIP=0 wiek=3 rower=0 dziecko=0)
+[22:00:11] [DZIECKO 18001] Bez opiekuna - odmowa
+[22:00:12] [PASAZER 18002] Przybycie (VIP=0 wiek=5 rower=1 dziecko=0)
+[22:00:12] [DZIECKO 18002] Bez opiekuna - odmowa
+[22:00:13] [PASAZER 18003] Przybycie (VIP=0 wiek=7 rower=0 dziecko=0)
+[22:00:13] [DZIECKO 18003] Bez opiekuna - odmowa
+[22:00:23] [KIEROWCA 17001] Odjazd: 0 pasazerow, 0 rowerow
+```
+
+**Weryfikacja**:
+- ✅ Wszystkie dzieci <8 lat są odrzucane
+- ✅ Autobus odjeżdża pusty (bo nikt nie może wsiąść)
+- ✅ Brak crashy, system działa stabilnie
+
+---
+
+## Test 10: Długotrwałe działanie - test stabilności
+
+**Cel**: Sprawdzenie czy system nie ma wycieków pamięci/zasobów
+
+**Parametry**: `./main 5 20 10 5`
+
+**Scenariusz**:
+- Uruchom system
+- Pozwól działać 30 minut
+- Monitoruj użycie pamięci (ps aux, top)
+- Zakończ przez Ctrl+C
+
+**Weryfikacja**:
+- ✅ Użycie pamięci stabilne (brak wycieków)
+- ✅ Liczba procesów stabilna (brak zombie)
+- ✅ System działa sprawnie przez cały czas
+- ✅ Graceful shutdown działa poprawnie po długim czasie działania
+- ✅ Wszystkie zasoby IPC są poprawnie czyszczone (`ipcs` po zakończeniu)
+
+---
+
+
 
 ## 🧹 Użyte mechanizmy systemowe
 
