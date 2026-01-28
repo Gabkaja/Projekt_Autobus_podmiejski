@@ -33,22 +33,22 @@ void log_write(const char* s) {
 }
 
 void sem_lock() {
-    struct sembuf sb = { 0, -1, 0 };
+    struct sembuf sb = { 0, -1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
 void sem_unlock() {
-    struct sembuf sb = { 0, 1, 0 };
+    struct sembuf sb = { 0, 1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
 void gate_lock(int gate) {
-    struct sembuf sb = { gate, -1, 0 };
+    struct sembuf sb = { gate, -1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
 void gate_unlock(int gate) {
-    struct sembuf sb = { gate, 1, 0 };
+    struct sembuf sb = { gate, 1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 

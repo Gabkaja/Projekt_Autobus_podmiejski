@@ -33,22 +33,22 @@ void log_write(const char* s) {
 }
 
 void sem_lock() {
-    struct sembuf sb = { 0, -1, 0 };
+    struct sembuf sb = { 0, -1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
 void sem_unlock() {
-    struct sembuf sb = { 0, 1, 0 };
+    struct sembuf sb = { 0, 1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
 void gate_lock(int gate) {
-    struct sembuf sb = { gate, -1, 0 };
+    struct sembuf sb = { gate, -1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
 void gate_unlock(int gate) {
-    struct sembuf sb = { gate, 1, 0 };
+    struct sembuf sb = { gate, 1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
@@ -69,7 +69,7 @@ int try_board(int bike, int with_child, int vip) {
     int R = bus->R;
 
     // Nie możemy wsiąść - system zamknięty lub autobus odjeżdża
-    if (sd || sb) {
+    if (sd || sb || dep) {
         sem_unlock();
         gate_unlock(gate);
         return 0; // System się wyłącza - kończymy proces
@@ -79,7 +79,7 @@ int try_board(int bike, int with_child, int vip) {
     int needed_seats = with_child ? 2 : 1;
     int needed_bikes = bike ? 1 : 0;
 
-    if (pass + needed_seats > P || bks + needed_bikes > R || dep) {
+    if (pass + needed_seats > P || bks + needed_bikes > R) {
         sem_unlock();
         gate_unlock(gate);
         return -1; // Brak miejsca - czekamy na następny autobus
