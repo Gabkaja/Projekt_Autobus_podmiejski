@@ -138,7 +138,7 @@ int try_board(int bike, int with_child, int vip) {
     int R = bus->R;  // Limit rowerów
 
     // Nie możemy wsiąść - system zamknięty lub autobus odjeżdża
-    if (sd || sb || dep) {
+    if (sd || sb ) {
         sem_unlock();
         gate_unlock(gate);
         return 0;  // System się wyłącza - kończymy proces
@@ -148,7 +148,7 @@ int try_board(int bike, int with_child, int vip) {
     int needed_seats = with_child ? 2 : 1;  // Rodzic + dziecko = 2 miejsca
     int needed_bikes = bike ? 1 : 0;
 
-    if (pass + needed_seats > P || bks + needed_bikes > R) {
+    if (pass + needed_seats > P || bks + needed_bikes > R || dep) {
         // Brak miejsca w autobusie
         sem_unlock();
         gate_unlock(gate);
