@@ -17,6 +17,7 @@ Zaawansowana symulacja systemu obsługi autobusów podmiejskich wykorzystująca 
 - [Przepływ procesów](#-przepływ-procesów)
 - [Przykładowe testy](#-przykładowe-testy)
 - [Użyte mechanizmy systemowe](#-użyte-mechanizmy-systemowe)
+- [Nawigacja po kodzie źródłowym](#-nawigacja-po-kodzie-źródłowym)
 
 ---
 
@@ -990,6 +991,126 @@ Powrót do początku pętli
 - `time()`, `localtime()`, `strftime()` – znaczniki czasowe w logach
 - `srand()`, `rand()` – generowanie losowych wartości (VIP, rower, wiek, dziecko, Ti)
 - `sleep()` – opóźnienia (czekanie T, jazda Ti, opóźnienia generatora)
+
+
+---
+## 🔗 Nawigacja po kodzie źródłowym
+
+### 📚 Definicje i struktury danych
+
+| Element | Opis | Link do kodu |
+|---------|------|--------------|
+| **`struct BusState`** | Struktura w pamięci dzielonej - stan autobusu, liczniki pasażerów/rowerów, flagi shutdown | [ipc.h#L37-L60](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/ipc.h#L37-L60) |
+| **`struct msg`** | Struktura wiadomości w kolejce - rejestracja i bilety | [ipc.h#L69-L82](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/ipc.h#L69-L82) |
+| **Typy wiadomości** | `MSG_REGISTER`, `MSG_TICKET_REPLY` - stałe dla komunikacji | [ipc.h#L25-L26](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/ipc.h#L25-L26) |
+| **Ścieżki kluczy IPC** | `SHM_PATH`, `SEM_PATH`, `MSG_PATH` - pliki dla `ftok()` | [ipc.h#L19-L21](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/ipc.h#L19-L21) |
+
+---
+
+### 🎯 Inicjalizacja systemu (main.c)
+
+| Funkcjonalność | Opis | Link do kodu |
+|----------------|------|--------------|
+| **Parsowanie argumentów** | Odczyt N, P, R, T z `argv[]` | [main.c#L152-L155](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L152-L155) |
+| **Tworzenie kluczy IPC** | `creat()` + `ftok()` dla SHM, SEM, MSG | [main.c#L174-L182](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L174-L182) |
+| **Inicjalizacja pamięci dzielonej** | `shmget()` + `shmat()` + inicjalizacja `BusState` | [main.c#L192-L205](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L192-L205) |
+| **Inicjalizacja semaforów** | `semget()` + `semctl(SETVAL)` dla 4 semaforów | [main.c#L213-L224](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L213-L224) |
+| **Inicjalizacja kolejki** | `msgget()` dla komunikacji kasa-pasażer | [main.c#L228-L233](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L228-L233) |
+| **Tworzenie procesów** | `fork()` + `execl()` dla driver (×N), cashier, dispatcher, generator | [main.c#L277-L323](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L277-L323) |
+| **Główna pętla wait** | `wait()` - zbieranie zombie procesów | [main.c#L328](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L328) |
+| **Cleanup zasobów** | `shmctl()`, `semctl()`, `msgctl()` - usuwanie IPC | [main.c#L84-L98](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L84-L98) |
+
+---
+
+### 🚌 Proces kierowcy (driver.c)
+
+| Funkcjonalność | Opis | Link do kodu |
+|----------------|------|--------------|
+| **Rejestracja handlerów sygnałów** | `sigaction()` dla SIGUSR1, SIGUSR2 | [driver.c#L165-L187](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L165-L187) |
+| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `semget()` | [driver.c#L139-L161](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L139-L161) |
+| **Blokada dworca** | `gate_lock(3)` - tylko 1 autobus na dworcu | [driver.c#L90-L93](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L90-L93) |
+| **Ustawienie PID kierowcy** | `bus->driver_pid = getpid()` w sekcji krytycznej | [driver.c#L209](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L209) |
+| **Czekanie T sekund** | Pętla `sleep(1)` z obsługą `force_flag` | [driver.c#L229-L241](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L229-L241) |
+| **Blokada bramek** | `gate_lock(1)` + `gate_lock(2)` przed odjazdem | [driver.c#L258-L259](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L258-L259) |
+| **Ustawienie flagi odjazdu** | `bus->departing = 1` + odczyt liczników | [driver.c#L263-L266](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L263-L266) |
+| **Reset liczników** | `bus->passengers = 0`, `bus->bikes = 0` | [driver.c#L278-L279](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L278-L279) |
+| **Odblokowanie bramek** | `gate_unlock(1, 2, 3)` - zwolnienie zasobów | [driver.c#L283-L285](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L283-L285) |
+| **Jazda (sleep Ti)** | `sleep(3 + rand() % 7)` - losowy czas trasy [3-9]s | [driver.c#L289-L290](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L289-L290) |
+| **Handler SIGUSR1** | Ustawienie `force_flag = 1` - wymuszenie odjazdu | [driver.c#L110-L113](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L110-L113) |
+
+---
+
+### 💰 Proces kasy (cashier.c)
+
+| Funkcjonalność | Opis | Link do kodu |
+|----------------|------|--------------|
+| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `msgget()` | [cashier.c#L79-L104](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L79-L104) |
+| **Główna pętla** | Sprawdzanie `shutdown` + `msgrcv()` z IPC_NOWAIT | [cashier.c#115-L174](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L115-L174) |
+| **Odbieranie rejestracji** | `msgrcv(MSG_REGISTER, IPC_NOWAIT)` | [cashier.c#L130](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L130) |
+| **Logowanie rejestracji** | Wpis do `report.txt` z PID, VIP, DZIECKO | [cashier.c#L156-L159](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L156-L159) |
+| **Wysyłanie biletu** | `msgsnd(MSG_TICKET_REPLY + PID)` dla nie-VIP dorosłych | [cashier.c#L169-L171](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L169-L171) |
+| **Cleanup** | `shmdt()`| [cashier.c#L181](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L181) |
+
+---
+
+### 🎮 Proces dyspozytora (dispatcher.c)
+
+| Funkcjonalność | Opis | Link do kodu |
+|----------------|------|--------------|
+| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `semget()` | [dispatcher.c#L116-L135](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L116-L135) |
+| **Handler SIGUSR1** | Wymuszenie odjazdu - `kill(driver_pid, SIGUSR1)` | [dispatcher.c#L76-L86](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L76-L86) |
+| **Handler SIGUSR2** | Blokada dworca - ustawienie flag shutdown | [dispatcher.c#L97-L112](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L97-L112) |
+| **Handler SIGINT** | Graceful shutdown - ustawienie flag | [dispatcher.c#L63-L66](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L63-L66) |
+| **Rejestracja handlerów** | `sigaction()` dla wszystkich sygnałów | [dispatcher.c#L144-L166](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L144-L166) |
+| **Główna pętla** | `pause()` - czekanie na sygnały | [dispatcher.c#L172](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L172) |
+
+---
+
+### 👤 Proces pasażera (passenger.c)
+
+| Funkcjonalność | Opis | Link do kodu |
+|----------------|------|--------------|
+| **Losowanie cech** | VIP (1%), rower (50%), wiek (0-79), dziecko (20%) | [passenger.c#L195-L200](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L195-L200) |
+| **Sprawdzenie dworca** | `station_blocked` → "Dworzec zamknięty" | [passenger.c#L213-L216](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L213-L216) |
+| **Odmowa dla samotnego dziecka** | Wiek <8 → "Bez opiekuna - odmowa" | [passenger.c#L231-L240](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L231-L240) |
+| **Wysłanie rejestracji** | `msgsnd(MSG_REGISTER)` do kasy | [passenger.c#L269-L271](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L269-L271) |
+| **Czekanie na bilet** | `msgrcv(MSG_TICKET_REPLY + PID)` dla nie-VIP | [passenger.c#L281](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L281) |
+| **Fork dla dziecka** | `pipe()` + `fork()` dla synchronizacji | [passenger.c#L326-L344](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L326-L344) |
+| **Proces dziecka** | `read()` z pipe - czekanie na sygnał rodzica | [passenger.c#L352](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L352) |
+| **Funkcja try_board()** | Atomowa próba wejścia - sprawdzenie miejsc | [passenger.c#L123-L165](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L123-L165) |
+| **Blokada bramki** | `gate_lock(1 lub 2)` w zależności od roweru | [passenger.c#L125-L128](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L125-L128) |
+| **Sprawdzenie warunków** | `shutdown`, `departing`, wolne miejsca | [passenger.c#L141-L156](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L141-L156) |
+| **Wejście do autobusu** | `bus->passengers += needed`, `bus->bikes++` | [passenger.c#L159-L160](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L159-L160) |
+| **Pętla prób wejścia** | Wywołania `try_board()` ze `sleep(1)` | [passenger.c#L374,L406](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L374-L406) |
+| **Sygnał dla dziecka** | `write()` do pipe po udanym wejściu | [passenger.c#L389](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L389) |
+| **Dekrementacja licznika** | `bus->active_passengers--` przed wyjściem | [passenger.c#L437](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L437) |
+
+---
+
+### 🔄 Generator pasażerów (passenger_generator.c)
+
+| Funkcjonalność | Opis | Link do kodu |
+|----------------|------|--------------|
+| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `semget()` | [passenger_generator.c#L106-L128](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L106-L128) |
+| **Główna pętla** | Nieskończona pętla `for(;;)` | [passenger_generator.c#L154-L199](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L154-L199) |
+| **Losowe opóźnienie** | `sleep(1 + rand() % 3)` - co 1-3 sekundy | [passenger_generator.c#L157-L158](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L157-L158) |
+| **Sprawdzenie shutdown** | `shutdown` lub `station_blocked` → koniec | [passenger_generator.c#L162-L165](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L162-L165) |
+| **Inkrementacja licznika** | `bus->active_passengers++` przed fork | [passenger_generator.c#L175](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L175) |
+| **Fork pasażera** | `fork()` + `execl("./passenger")` | [passenger_generator.c#L179-L195](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L179-L195) |
+
+
+
+---
+
+### 🔍 Kluczowe sekcje krytyczne
+
+| Sekcja krytyczna | Chroniony zasób | Gdzie | Link |
+|------------------|-----------------|-------|------|
+| **Próba wejścia pasażera** | `bus->passengers`, `bus->bikes` | passenger.c | [L159-L160](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L159-L160) |
+| **Odjazd autobusu** | `bus->departing`, liczniki | driver.c | [L263](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L263) |
+| **Przyjazd na dworzec** | `bus->driver_pid`, `bus->departing` | driver.c | [L210](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L210) |
+| **Tworzenie pasażera** | `bus->active_passengers` | passenger_generator.c | [L174-L176](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L174-L176) |
+| **Koniec pasażera** | `bus->active_passengers` | passenger.c | [L450](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L450) |
 
 
 ---
