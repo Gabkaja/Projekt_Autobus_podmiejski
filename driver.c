@@ -206,6 +206,21 @@ int main() {
 
         // Zapisz swój PID jako aktualny kierowca i zresetuj flagę departing
         sem_lock();
+        // Sprawdzamy czy nie ma już innego kierowcy (ochrona przed CTRL+Z)
+        if (bus->driver_pid != 0 && bus->driver_pid != getpid()) {
+            int sd_tmp = bus->shutdown;
+            int sb_tmp = bus->station_blocked;
+            sem_unlock();
+            gate_unlock(3);
+
+            // Jeśli shutdown - kończymy od razu
+            if (sd_tmp || sb_tmp) {
+                break;
+            }
+
+            sleep(1);
+            continue;
+        }
         bus->driver_pid = getpid();  // Zapisz PID kierowcy
         bus->departing = 0;  // Autobus jeszcze nie odjeżdża
         int sb = bus->station_blocked;  // Odczytaj flagę blokady
