@@ -596,7 +596,7 @@ Powrót do początku pętli
 - 10 sekund czasu oczekiwania
 
 **Scenariusz**: 
-- Generator tworzy 20 pasażerów w krótkim czasie (1-3s)
+- Generator tworzy pasażerów w krótkim czasie (1-3s)
 - Wszyscy próbują wsiąść do jednego małego autobusu
 - Część będzie musiała czekać na następny kurs
 
@@ -687,17 +687,21 @@ Powrót do początku pętli
 
 **Przykładowe logi**:
 ```
-[16:20:10] [KIEROWCA 5001] Autobus na dworcu
-[16:20:11] [PASAZER 6001] Przybycie (VIP=0 wiek=35 rower=0 dziecko=1)
-[16:20:12] [DOROSLY+DZIECKO 6001] Wsiadl (VIP=0 rower=0)
-[16:20:13] [PASAZER 6002] Przybycie (VIP=0 wiek=28 rower=1 dziecko=1)
-[16:20:14] [DOROSLY+DZIECKO 6002] Wsiadl (VIP=0 rower=1)
-[16:20:15] [PASAZER 6003] Przybycie (VIP=0 wiek=42 rower=0 dziecko=1)
-[16:20:16] [DOROSLY+DZIECKO 6003] Wsiadl (VIP=0 rower=0)
-[16:20:17] [PASAZER 6004] Przybycie (VIP=0 wiek=31 rower=0 dziecko=1)
-[16:20:25] [KIEROWCA 5001] Odjazd: 6 pasazerow, 1 rowerow
-[16:20:26] [KIEROWCA 5002] Autobus na dworcu
-[16:20:27] [DOROSLY+DZIECKO 6004] Wsiadl (VIP=0 rower=0)
+[12:59:37] [DOROSLY+DZIECKO 2744158] Wsiadl (VIP=0 rower=1)
+[12:59:37] [DOROSLY+DZIECKO 2744046] Wsiadl (VIP=0 rower=0)
+[12:59:37] [DOROSLY+DZIECKO 2744058] Wsiadl (VIP=0 rower=0)
+[12:59:37] [PASAZER 2744180] Przybycie (VIP=0 wiek=56 rower=1 dziecko=1)
+[12:59:37] [PASAZER 2744181] Przybycie (VIP=0 wiek=28 rower=1 dziecko=1)
+[12:59:37] [PASAZER 2744182] Przybycie (VIP=0 wiek=54 rower=0 dziecko=1)
+[12:59:38] [KASA] Rejestracja PID=2744180 VIP=0 DZIECKO=0
+[12:59:38] [KASA] Rejestracja PID=2744182 VIP=0 DZIECKO=0
+[12:59:38] [KASA] Rejestracja PID=2744181 VIP=0 DZIECKO=0
+[12:59:38] [PASAZER 2744184] Przybycie (VIP=0 wiek=77 rower=1 dziecko=1)
+[12:59:39] [KASA] Rejestracja PID=2744184 VIP=0 DZIECKO=0
+[12:59:39] [PASAZER 2744188] Przybycie (VIP=0 wiek=60 rower=0 dziecko=1)
+[12:59:40] [KASA] Rejestracja PID=2744188 VIP=0 DZIECKO=0
+[12:59:41] [KIEROWCA 2743949] Powrot po 7s
+[12:59:42] [KIEROWCA 2743950] Odjazd: 6 pasazerow, 1 rowerow
 ```
 
 **Weryfikacja**:
@@ -893,7 +897,7 @@ Powrót do początku pętli
 ```
 
 **Weryfikacja**:
-- ✅ BRAK logów "KASA Rejestracja" dla VIPów przed wejściem do autobusu
+- ✅ BRAK logów "KASA Rejestracja" dla VIPów PRZED wejściem do autobusu
 - ✅ VIPowie wsiadają NATYCHMIAST bez czekania na bilet
 
 ---
