@@ -826,44 +826,47 @@ Powrót do początku pętli
 
 ---
 
-## Test 7: Maksymalna konkurencja - 10 autobusów, duży ruch
+## Test 7: Stress test
 
-**Cel**: Stress test z wieloma autobusami i pasażerami
+**Cel**: Stress test - symulacja bez sleepów
 
-**Parametry**: `./main 10 15 8 3`
-- 10 autobusów
-- 15 miejsc
-- 8 rowerów
-- 3 sekundy czasu (bardzo szybki obrót)
+**Parametry**: `./main 3 10 5 4`
+- 3 autobusów
+- 10 miejsc
+- 5 rowerów
+- 4 sekundy czasu (nie dotyczy gdyz sleep jest zakomentowany)
+- zmiana kodu na potrzeby testu - dodano sprawdzanie limitu procesow
 
 **Scenariusz**:
-- Generator tworzy pasażerów co 1-3s
-- Wiele autobusów jednocześnie na dworcu
-- Szybka rotacja - autobusy wracają bardzo szybko
+- Generator tworzy pasażerów natychmiast z odgórnym limitem(w celu uniknięcia wyczerpania limitu procesów na urzadzeniu)
+- Autobusy odjeżdzają natychmiast i wracaja od razu
 
 **Przykładowe logi (fragment)**:
 ```
-[20:10:00] [KIEROWCA 13001] Autobus na dworcu
-[20:10:01] [PASAZER 14001] Wsiadl (VIP=0 rower=1)
-[20:10:02] [PASAZER 14002] Wsiadl (VIP=0 rower=0)
-[20:10:03] [KIEROWCA 13001] Odjazd: 2 pasazerow, 1 rowerow
-[20:10:03] [KIEROWCA 13002] Autobus na dworcu
-[20:10:04] [PASAZER 14003] Wsiadl (VIP=0 rower=1)
-[20:10:05] [PASAZER 14004] Wsiadl (VIP=0 rower=0)
-[20:10:06] [KIEROWCA 13002] Odjazd: 2 pasazerow, 1 rowerow
-[20:10:06] [KIEROWCA 13003] Autobus na dworcu
-[20:10:07] [KIEROWCA 13001] Powrot po 4s
-[20:10:07] [PASAZER 14005] Wsiadl (VIP=0 rower=0)
-[20:10:09] [KIEROWCA 13003] Odjazd: 1 pasazerow, 0 rowerow
-[20:10:09] [KIEROWCA 13004] Autobus na dworcu
-[20:10:10] [KIEROWCA 13002] Powrot po 4s
+[10:46:38] [KASA] Rejestracja PID=2719891 VIP=0 DZIECKO=0
+[10:46:38] [KASA] Rejestracja PID=2719890 VIP=0 DZIECKO=0
+[10:46:38] [PASAZER 2719891] Wsiadl (VIP=0 rower=1)
+[10:46:38] [KIEROWCA 2719886] Odjazd: 1 pasazerow, 1 rowerow
+[10:46:38] [KIEROWCA 2719886] Powrot po 8s
+[10:46:38] [KIEROWCA 2719885] Autobus na dworcu
+[10:46:38] [GENERATOR] Fork PID=2719894 (zywych=5/100)
+[10:46:38] [KIEROWCA 2719885] Odjazd: 1 pasazerow, 0 rowerow
+[10:46:38] [KIEROWCA 2719885] Powrot po 4s
+[10:46:38] [PASAZER 2719890] Wsiadl (VIP=0 rower=0)
+[10:46:38] [PASAZER 2719893] Przybycie (VIP=0 wiek=32 rower=1 dziecko=0)
+[10:46:38] [KIEROWCA 2719884] Autobus na dworcu
+[10:46:38] [PASAZER 2719894] Przybycie (VIP=0 wiek=65 rower=0 dziecko=0)
+[10:46:38] [KASA] Rejestracja PID=2719894 VIP=0 DZIECKO=0
+[10:46:38] [KIEROWCA 2719884] Odjazd: 0 pasazerow, 0 rowerow
+[10:46:38] [KASA] Rejestracja PID=2719893 VIP=0 DZIECKO=0
+[10:46:38] [KIEROWCA 2719884] Powrot po 6s
 ```
 
 **Weryfikacja**:
 - ✅ W KAŻDEJ chwili MAX 1 autobus na dworcu (semafor gate[3])
 - ✅ Brak nakładających się "Autobus na dworcu" bez "Odjazd"
-- ✅ Wszystkie powroty są logiczne (czas 3-9s)
-- ✅ Brak deadlocków mimo 10 autobusów
+- ✅ Brak deadlocków
+- ✅ Limit nie jest przekraczany 
 
 ---
 
