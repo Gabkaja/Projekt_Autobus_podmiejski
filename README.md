@@ -228,7 +228,7 @@ Ctrl+C
 
 ### Semafory (System V)
 
-System wykorzystuje **6 semaforów**:
+System wykorzystuje **5 semaforów**:
 
 | Indeks | Nazwa | Inicjalna wartość | Funkcja |
 |--------|-------|-------------------|---------|
@@ -236,8 +236,7 @@ System wykorzystuje **6 semaforów**:
 | **1** | `gate_bike` | 1 | Bramka dla pasażerów z rowerami |
 | **2** | `gate_normal` | 1 | Bramka dla pasażerów bez rowerów |
 | **3** | `dworzec` | 1 | Ograniczenie do jednego autobusu na dworcu |
-| **4** | `waiting_passengers` | 0 | (Nieużywany w obecnej wersji) |
-| **5** | `generator_limit` | `MAX_PASSENGERS` | Limit aktywnych procesów pasażerów |
+| **4** | `generator_limit` | `MAX_PASSENGERS` | Limit aktywnych procesów pasażerów |
 
 ### Pamięć dzielona (struct BusState)
 
