@@ -1,14 +1,11 @@
 /*
- * DISPATCHER.C - Proces Dyspozytora
+ * dispatcher.c
  * 
- * Ten proces odpowiada za zarządzanie ruchem autobusów poprzez obsługę sygnałów.
- * Główne zadania:
- * - Wymuszanie odjazdu autobusu (sygnał SIGUSR1)
- * - Blokowanie dworca i zamykanie systemu (sygnał SIGUSR2)
- * - Obsługa przerwania SIGINT (Ctrl+C)
- * 
- * Dyspozytor nie wykonuje aktywnych operacji - działa reaktywnie,
- * reagując tylko na otrzymane sygnały.
+ * Proces dyspozytora zarządzającego operacjami dworca.
+ * Obsługuje sygnały i steruje pracą systemu:
+ * - SIGUSR1: wymuszony odjazd autobusu
+ * - SIGUSR2: blokada dworca
+ * - SIGINT: shutdown systemu
  */
 
 #include <stdio.h>
@@ -21,162 +18,165 @@
 #include <time.h>
 #include "ipc.h"
 
-// Globalne zmienne
-int shmid;  // ID pamięci dzielonej
-struct BusState* bus;  // Wskaźnik do stanu systemu
-volatile sig_atomic_t should_exit = 0;  // Flaga zakończenia (volatile - może być zmieniana w handlerze)
+int shmid;
+struct BusState* bus;
+volatile sig_atomic_t should_exit = 0;
 
-/*
- * Funkcja ts (timestamp) - generuje aktualny znacznik czasu
- * Parametry:
- *   buf - bufor na wynik w formacie HH:MM:SS
- *   n - rozmiar bufora
- */
+/* Generuje znacznik czasu HH:MM:SS */
 void ts(char* buf, size_t n) {
-    time_t t = time(NULL);  // Pobierz aktualny czas systemowy
-    struct tm* tm_info = localtime(&t);  // Konwertuj na czas lokalny
+    time_t t = time(NULL);
+    struct tm* tm_info = localtime(&t);
     if (tm_info == NULL) {
-        snprintf(buf, n, "00:00:00");  // Wartość domyślna w razie błędu
+        snprintf(buf, n, "00:00:00");
         return;
     }
-    strftime(buf, n, "%H:%M:%S", tm_info);  // Formatuj jako HH:MM:SS
+    strftime(buf, n, "%H:%M:%S", tm_info);
 }
 
-/*
- * Funkcja log_write - zapisuje wpis do pliku report.txt
- * Parametry:
- *   s - tekst do zapisania
- * 
- * Otwiera plik w trybie append, więc nie nadpisuje poprzednich wpisów
- */
+/* Zapis do logu dyspozytora */
 void log_write(const char* s) {
+    int fd = open("dispatcher.log", O_CREAT | O_WRONLY | O_APPEND, 0600);
+    if (fd == -1) return;
+    write(fd, s, strlen(s));
+    close(fd);
+}
+
+/* Zapis do głównego raportu */
+void log_main(const char* s) {
     int fd = open("report.txt", O_CREAT | O_WRONLY | O_APPEND, 0600);
-    if (fd == -1) return;  // Jeśli nie można otworzyć pliku, po prostu wyjdź
-    write(fd, s, strlen(s));  // Zapisz tekst
-    close(fd);  // Zamknij plik
+    if (fd == -1) return;
+    write(fd, s, strlen(s));
+    close(fd);
 }
 
 /*
- * Handler sygnału SIGINT (Ctrl+C)
- * Ustawia flagę should_exit aby zakończyć proces w kontrolowany sposób
+ * Obsługa SIGINT - graceful shutdown całego systemu.
+ * Ustawia flagi shutdown i station_blocked.
  */
 void handle_int(int sig) {
-    (void)sig;  // Nie używamy parametru (unikamy ostrzeżenia kompilatora)
-    should_exit = 1;  // Ustaw flagę zakończenia
+    (void)sig;
+    if (bus) {
+        bus->shutdown = 1;
+        bus->station_blocked = 1;
+        
+        char b[64];
+        ts(b, sizeof(b));
+        char ln[128];
+        snprintf(ln, sizeof(ln), "[%s] [DYSPOZYTOR] SIGINT - rozpoczynam shutdown systemu\n", b);
+        log_write(ln);
+        log_main(ln);
+    }
+    should_exit = 1;
 }
 
 /*
- * Handler sygnału SIGUSR1 - wymuszenie odjazdu autobusu
- * 
- * Gdy dyspozytor otrzyma SIGUSR1:
- * 1. Sprawdza czy jakiś kierowca jest aktualnie na dworcu (bus->driver_pid > 0)
- * 2. Jeśli tak, wysyła do niego sygnał SIGUSR1
- * 3. Kierowca otrzymując ten sygnał natychmiast odjeżdża (nie czekając T sekund)
+ * Obsługa SIGUSR1 - wymuszenie odjazdu autobusu.
+ * Przekazuje sygnał do aktualnego kierowcy (bus->driver_pid).
  */
 void handle_usr1(int sig) {
-    (void)sig;  // Nie używamy parametru
+    (void)sig;
     if (bus && bus->driver_pid > 0) {
-        kill(bus->driver_pid, SIGUSR1);  // Wyślij SIGUSR1 do kierowcy
+        kill(bus->driver_pid, SIGUSR1);
         char b[64];
         ts(b, sizeof(b));
         char ln[128];
         snprintf(ln, sizeof(ln), "[%s] [DYSPOZYTOR] Wymuszenie odjazdu\n", b);
         log_write(ln);
+        log_main(ln);
     }
 }
 
 /*
- * Handler sygnału SIGUSR2 - blokada dworca i zamknięcie systemu
- * 
- * Gdy dyspozytor otrzyma SIGUSR2:
- * 1. Ustawia flagę station_blocked (nowi pasażerowie nie mogą wejść)
- * 2. Ustawia flagę shutdown (cały system zaczyna się wyłączać)
- * 3. Wysyła SIGUSR2 do kierowcy (jeśli jest na dworcu)
- * 4. Ustawia flagę should_exit aby zakończyć proces dyspozytora
+ * Obsługa SIGUSR2 - blokada dworca i shutdown.
+ * Powiadamia kierowcę i proces główny (main).
+ * To jest awaryjne zamknięcie dworca.
  */
 void handle_usr2(int sig) {
-    (void)sig;  // Nie używamy parametru
+    (void)sig;
     if (bus) {
-        bus->station_blocked = 1;  // Zablokuj dworzec
-        bus->shutdown = 1;  // Rozpocznij wyłączanie systemu
+        bus->station_blocked = 1;
+        bus->shutdown = 1;
         if (bus->driver_pid > 0) {
-            kill(bus->driver_pid, SIGUSR2);  // Powiadom kierowcę
+            kill(bus->driver_pid, SIGUSR2);
         }
+        
+        /* Powiadomienie procesu głównego */
+        kill(getppid(), SIGUSR2);
+        
         char b[64];
         ts(b, sizeof(b));
         char ln[128];
         snprintf(ln, sizeof(ln), "[%s] [DYSPOZYTOR] Blokada dworca\n", b);
         log_write(ln);
+        log_main(ln);
     }
-    should_exit = 1;  // Zakończ proces dyspozytora
+    should_exit = 1;
 }
 
 int main() {
-    // === INICJALIZACJA KLUCZA IPC ===
-    key_t shm_key = ftok(SHM_PATH, 'S');  // Generuj klucz dla pamięci dzielonej
+    /* Podłączenie do pamięci dzielonej */
+    key_t shm_key = ftok(SHM_PATH, 'S');
     if (shm_key == -1) {
         perror("ftok shm");
         return 1;
     }
 
-    // === UZYSKANIE DOSTĘPU DO PAMIĘCI DZIELONEJ ===
-    // Dyspozytor NIE tworzy pamięci (bez IPC_CREAT), tylko się podłącza
     shmid = shmget(shm_key, sizeof(struct BusState), 0600);
     if (shmid == -1) {
         perror("shmget");
         return 1;
     }
 
-    // === PODŁĄCZENIE DO PAMIĘCI DZIELONEJ ===
-    bus = shmat(shmid, NULL, 0);  // Przyłącz segment pamięci do przestrzeni adresowej
+    bus = shmat(shmid, NULL, 0);
     if (bus == (void*)-1) {
         perror("shmat");
         return 1;
     }
 
-    // === LOGOWANIE STARTU ===
     char b[64];
     ts(b, sizeof(b));
     char ln[128];
     snprintf(ln, sizeof(ln), "[%s] [DYSPOZYTOR] Start pracy\n", b);
     log_write(ln);
+    log_main(ln);
 
-    // === KONFIGURACJA HANDLERA SIGINT ===
+    /* Konfiguracja obsługi SIGINT */
     struct sigaction sai;
-    memset(&sai, 0, sizeof(sai));  // Wyzeruj strukturę
-    sai.sa_handler = handle_int;  // Ustaw funkcję obsługi
-    sigemptyset(&sai.sa_mask);  // Pusta maska sygnałów (nie blokuj innych sygnałów)
-    sai.sa_flags = SA_RESTART;  // Automatycznie wznawiaj przerwane wywołania systemowe
-    sigaction(SIGINT, &sai, NULL);  // Zarejestruj handler
+    memset(&sai, 0, sizeof(sai));
+    sai.sa_handler = handle_int;
+    sigemptyset(&sai.sa_mask);
+    sai.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &sai, NULL);
 
-    // === KONFIGURACJA HANDLERA SIGUSR1 ===
+    /* Konfiguracja obsługi SIGUSR1 */
     struct sigaction sa1;
-    memset(&sa1, 0, sizeof(sa1));  // Wyzeruj strukturę
-    sa1.sa_handler = handle_usr1;  // Ustaw funkcję obsługi
-    sigemptyset(&sa1.sa_mask);  // Pusta maska sygnałów
-    sa1.sa_flags = SA_RESTART;  // Automatycznie wznawiaj przerwane wywołania systemowe
-    sigaction(SIGUSR1, &sa1, NULL);  // Zarejestruj handler
+    memset(&sa1, 0, sizeof(sa1));
+    sa1.sa_handler = handle_usr1;
+    sigemptyset(&sa1.sa_mask);
+    sa1.sa_flags = SA_RESTART;
+    sigaction(SIGUSR1, &sa1, NULL);
 
-    // === KONFIGURACJA HANDLERA SIGUSR2 ===
+    /* Konfiguracja obsługi SIGUSR2 */
     struct sigaction sa2;
-    memset(&sa2, 0, sizeof(sa2));  // Wyzeruj strukturę
-    sa2.sa_handler = handle_usr2;  // Ustaw funkcję obsługi
-    sigemptyset(&sa2.sa_mask);  // Pusta maska sygnałów
-    sa2.sa_flags = SA_RESTART;  // Automatycznie wznawiaj przerwane wywołania systemowe
-    sigaction(SIGUSR2, &sa2, NULL);  // Zarejestruj handler
+    memset(&sa2, 0, sizeof(sa2));
+    sa2.sa_handler = handle_usr2;
+    sigemptyset(&sa2.sa_mask);
+    sa2.sa_flags = SA_RESTART;
+    sigaction(SIGUSR2, &sa2, NULL);
 
-    // === GŁÓWNA PĘTLA DYSPOZYTORA ===
-    // Proces czeka na sygnały używając pause()
-    // pause() zawiesza proces do otrzymania sygnału
+    /*
+     * Główna pętla - czeka na sygnały.
+     * pause() minimalizuje zużycie CPU.
+     */
     while (!should_exit) {
-        pause();  // Czekaj na sygnał (bardzo wydajne - nie zużywa CPU)
+        pause();
     }
 
-    // === ZAKOŃCZENIE PRACY ===
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln), "[%s] [DYSPOZYTOR] Koniec pracy\n", b);
     log_write(ln);
+    log_main(ln);
 
-    shmdt(bus);  // Odłącz pamięć dzieloną
+    shmdt(bus);
     return 0;
 }
