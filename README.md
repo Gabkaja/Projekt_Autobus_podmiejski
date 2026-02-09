@@ -1,6 +1,6 @@
 ﻿# 🚍 Symulacja „Autobus podmiejski"
 
-Zaawansowana symulacja systemu obsługi autobusów podmiejskich wykorzystująca mechanizmy **System V IPC** (pamięć dzielona, semafory, kolejki komunikatów), sygnały POSIX oraz komunikację międzyprocesową. Projekt demonstruje praktyczne zastosowanie synchronizacji procesów w środowisku Linux.
+Zaawansowana symulacja systemu obsługi autobusów podmiejskich wykorzystująca mechanizmy **System V IPC** (pamięć dzielona, semafory, kolejki komunikatów), sygnały POSIX, wielowątkowość oraz komunikację międzyprocesową. Projekt demonstruje praktyczne zastosowanie synchronizacji procesów w środowisku Linux.
 
 ---
 
@@ -15,7 +15,7 @@ Zaawansowana symulacja systemu obsługi autobusów podmiejskich wykorzystująca 
 - [Sterowanie sygnałami](#-sterowanie-sygnałami)
 - [Mechanizmy synchronizacji](#-mechanizmy-synchronizacji)
 - [Przepływ procesów](#-przepływ-procesów)
-- [Przykładowe testy](#-przykładowe-testy)
+- [Testy systemu](#-testy-systemu)
 - [Użyte mechanizmy systemowe](#-użyte-mechanizmy-systemowe)
 - [Nawigacja po kodzie źródłowym](#-nawigacja-po-kodzie-źródłowym)
 
@@ -34,7 +34,7 @@ Zaawansowana symulacja systemu obsługi autobusów podmiejskich wykorzystująca 
 - **Kasa biletowa** — rejestruje wszystkich pasażerów, wystawia bilety dla zwykłych dorosłych
 - **Pasażerowie VIP (~1%)** — posiadają wcześniej zakupiony bilet, tylko rejestracja
 - **Dzieci < 8 lat** — nie mogą podróżować bez opiekuna (automatyczna odmowa)
-- **Dorośli z dziećmi** — zajmują 2 miejsca, dziecko jako osobny proces synchronizowany przez pipe
+- **Dorośli z dziećmi** — zajmują 2 miejsca, dziecko jako osobny wątek synchronizowany przez mutex i condition variable
 - **Pasażerowie z rowerami** — używają dedykowanej bramki (semafora 2)
 - **Generator pasażerów** — tworzy nowych pasażerów co 1-3 sekundy w nieskończoność
 
@@ -50,10 +50,10 @@ Zaawansowana symulacja systemu obsługi autobusów podmiejskich wykorzystująca 
 ## 🖥️ Wymagania systemowe
 
 - **System operacyjny**: Linux (testowane na Ubuntu 24.04, Debian, Raspberry Pi OS)
-- **Kompilator**: GCC z obsługą standardu C99 lub nowszego
+- **Kompilator**: GCC z obsługą standardu C99 lub nowszego oraz biblioteki pthread
 - **Pakiety**: `build-essential`, `make`
 - **Uprawnienia**: Możliwość tworzenia zasobów System V IPC
-- **Brak zewnętrznych bibliotek** — wykorzystuje wyłącznie standardowe nagłówki POSIX i System V
+- **Biblioteki**: pthread (standardowo dostępna w systemach Linux)
 
 ---
 
@@ -66,7 +66,7 @@ Zaawansowana symulacja systemu obsługi autobusów podmiejskich wykorzystująca 
 ├── driver.c                 # Proces kierowcy autobusu
 ├── cashier.c                # Proces kasy biletowej
 ├── dispatcher.c             # Proces dyspozytora (zarządzanie sygnałami)
-├── passenger.c              # Proces pasażera (logika wejścia)
+├── passenger.c              # Proces pasażera z obsługą wątków
 ├── passenger_generator.c    # Generator procesów pasażerów
 ├── Makefile                 # Automatyzacja kompilacji i czyszczenia
 ├── README.md                # Dokumentacja projektu
@@ -82,7 +82,7 @@ Zaawansowana symulacja systemu obsługi autobusów podmiejskich wykorzystująca 
 | **driver.c** | Cykl pracy autobusu: przyjazd → oczekiwanie T sekund → odjazd → jazda Ti sekund → powrót |
 | **cashier.c** | Odbieranie rejestracji pasażerów, wysyłanie biletów dla dorosłych nie-VIP |
 | **dispatcher.c** | Obsługa sygnałów SIGUSR1 (wymuszenie), SIGUSR2 (blokada), przekazywanie do kierowcy |
-| **passenger.c** | Losowanie cech, rejestracja w kasie, czekanie na bilet, próby wejścia, fork() dla dzieci |
+| **passenger.c** | Losowanie cech, rejestracja w kasie, czekanie na bilet, próby wejścia, wątki pthread dla dzieci |
 | **passenger_generator.c** | Nieskończone tworzenie pasażerów co 1-3 sekundy aż do shutdown |
 
 ---
@@ -123,268 +123,160 @@ Program główny wymaga **4 parametry**:
 
 ### Parametry
 
-| Parametr | Opis | Zakres wartości |
-|----------|------|----------------|
-| **N** | Liczba autobusów w flocie | 1-100 |
-| **P** | Maksymalna pojemność pasażerów | 1-1000 |
-| **R** | Liczba miejsc na rowery | 0-100 |
-| **T** | Czas oczekiwania na dworcu (sekundy) | 1-3600 |
+- **N** — liczba autobusów w systemie (np. `3`)
+- **P** — maksymalna pojemność autobusu w osobach (np. `20`)
+- **R** — maksymalna liczba rowerów w autobusie (np. `5`)
+- **T** — czas oczekiwania autobusu na dworcu w sekundach (np. `5`)
 
-### Przykłady uruchomienia
+### Przykład uruchomienia
 
-#### Mała symulacja (test funkcjonalności)
 ```bash
-./main 2 10 5 3
+./main 3 20 5 5
 ```
-**Opis:** 2 autobusy, max 10 pasażerów, max 5 rowerów, 3s oczekiwanie na dworcu
 
-#### Średnia symulacja (typowe użycie)
-```bash
-./main 3 20 10 5
-```
-**Opis:** 3 autobusy, max 20 pasażerów, max 10 rowerów, 5s oczekiwanie na dworcu
+Uruchamia system z **3 autobusami**, każdy o pojemności **20 pasażerów**, **5 miejsc na rowery**, czas oczekiwania **5 sekund**.
 
-#### Duża symulacja (test stabilności)
-```bash
-./main 5 50 20 4
-```
-**Opis:** 5 autobusów, max 50 pasażerów, max 20 rowerów, 4s oczekiwanie na dworcu
+### Weryfikacja działania
 
-> **Uwaga:** Program działa w nieskończoność (generator tworzy pasażerów ciągle) aż do otrzymania sygnału shutdown (SIGINT lub SIGUSR2).
+Po uruchomieniu system tworzy następujące logi:
+- `report.txt` — główny raport zdarzeń
+- `driver.log` — szczegółowe logi kierowców
+- `passenger.log` — szczegółowe logi pasażerów
+- `cashier.log` — logi kasy biletowej
+- `dispatcher.log` — logi dyspozytora
+- `generator.log` — logi generatora pasażerów
 
 ---
 
-## 📝 System logowania
+## 📊 System logowania
 
-Wszystkie zdarzenia zapisują się do pliku:
-
-```
-report.txt
-```
-
-### Format logów
+### Format wpisów w report.txt
 
 ```
-[HH:MM:SS] [MODUŁ] Opis zdarzenia
+[HH:MM:SS] [PROCES] Opis zdarzenia
 ```
 
-### Rodzaje zdarzeń w logu
-
-| Moduł | Przykładowe zdarzenia |
-|-------|----------------------|
-| **MAIN** | Start systemu, shutdown initiated, system zakończony |
-| **GENERATOR** | Start, koniec pracy |
-| **KASA** | Rejestracja (PID, VIP, DZIECKO), koniec pracy |
-| **PASAZER** | Przybycie (VIP, wiek, rower, dziecko), wsiadł, dworzec zamknięty |
-| **DZIECKO** | Bez opiekuna - odmowa |
-| **DOROSLY+DZIECKO** | Wsiadł (VIP, rower) |
-| **KIEROWCA** | Start pracy, autobus na dworcu, odjazd (liczba pasażerów/rowerów), powrót, koniec pracy |
-| **DYSPOZYTOR** | Start pracy, wymuszenie odjazdu, blokada dworca, koniec pracy |
-
-### Podgląd logów na żywo
-
-```bash
-tail -f report.txt
-```
-
-### Przykładowy fragment logu
+### Przykład logu
 
 ```
-[14:32:15] [MAIN] Start systemu: N=3 P=20 R=10 T=5
-[14:32:15] [GENERATOR] Start - tworzy pasazerow w nieskonczonosc
-[14:32:15] [KASA] Start pracy
-[14:32:15] [DYSPOZYTOR] Start pracy
-[14:32:15] [KIEROWCA 12345] Start pracy
-[14:32:15] [KIEROWCA 12346] Start pracy
-[14:32:15] [KIEROWCA 12347] Start pracy
-[14:32:15] [KIEROWCA 12345] Autobus na dworcu
-[14:32:16] [PASAZER 12350] Przybycie (VIP=0 wiek=25 rower=1 dziecko=0)
-[14:32:16] [KASA] Rejestracja PID=12350 VIP=0 DZIECKO=0
-[14:32:16] [PASAZER 12350] Wsiadl (VIP=0 rower=1)
-[14:32:18] [PASAZER 12355] Przybycie (VIP=0 wiek=32 rower=0 dziecko=1)
-[14:32:18] [KASA] Rejestracja PID=12355 VIP=0 DZIECKO=0
-[14:32:18] [DOROSLY+DZIECKO 12355] Wsiadl (VIP=0 rower=0)
-[14:32:20] [KIEROWCA 12345] Odjazd: 3 pasazerow, 1 rowerow
-[14:32:27] [KIEROWCA 12345] Powrot po 7s
-[14:32:27] [KIEROWCA 12346] Autobus na dworcu
+[21:22:38] [KIEROWCA 142472] Autobus na dworcu
+[21:22:38] [PASAZER 142591] Wsiadl (VIP=0 rower=1)
+[21:22:38] [PASAZER 142596] Wsiadl (VIP=0 rower=1)
+[21:22:39] [DOROSLY+DZIECKO 142568] Wsiadl (VIP=0 rower=1)
+[21:22:43] [KIEROWCA 142472] Odjazd: 6 pasazerow, 5 rowerow
+[21:22:52] [KIEROWCA 142472] Powrot po 9s
 ```
 
-> **Uwaga:** Plik `report.txt` jest dopisywany (append). Czyszczony przy każdym `make clean`.
+### Typy zdarzeń
+
+| Zdarzenie | Opis |
+|-----------|------|
+| **Autobus na dworcu** | Kierowca zajął dworzec i oczekuje na pasażerów |
+| **Przybycie** | Pasażer pojawił się na dworcu |
+| **Wsiadl** | Pasażer pomyślnie wszedł do autobusu |
+| **Odjazd** | Autobus rozpoczął trasę |
+| **Powrot** | Autobus wrócił po rozwiezieniu pasażerów |
+| **Dojechalem** | Pasażer dotarł do celu |
 
 ---
 
-## 🧭 Sterowanie sygnałami
+## 🎛️ Sterowanie sygnałami
 
 System reaguje na następujące sygnały:
 
-| Sygnał | Źródło | Odbiorca | Działanie |
-|--------|--------|----------|-----------|
-| **SIGUSR1** | Dyspozytor | Kierowca | Wymuszenie natychmiastowego odjazdu autobusu |
-| **SIGUSR2** | Dyspozytor | Kierowca | Blokada dworca i rozpoczęcie shutdown |
-| **SIGINT** (Ctrl+C) | Użytkownik | Main → Dyspozytor | Graceful shutdown całego systemu |
-| **SIGCHLD** | Kernel | Main, Generator | Zbieranie zombie processes |
-
-### Szczegółowe działanie sygnałów
-
-#### SIGUSR1 — Wymuszenie odjazdu
+### SIGUSR1 — Wymuszenie odjazdu
 
 ```bash
-killall -SIGUSR1 dispatcher
+# Znajdź PID dyspozytora
+ps aux | grep dispatcher
+
+# Wyślij sygnał wymuszenia odjazdu
+kill -USR1 <PID_DYSPOZYTORA>
 ```
 
-**Działanie:**
-1. Dyspozytor otrzymuje sygnał
-2. Przekazuje SIGUSR1 do kierowcy aktualnie na dworcu (bus->driver_pid)
-3. Kierowca ustawia flagę `force_flag=1`
-4. Autobus przerywa czekanie i odjeżdża natychmiast
-5. Logowane jako `[DYSPOZYTOR] Wymuszenie odjazdu`
+**Efekt**: Aktualnie stojący autobus odjeżdża natychmiast (przed upływem czasu T).
 
-**Zastosowanie:** Przyspieszenie odjazdu autobusu w sytuacji krytycznej
-
----
-
-#### SIGUSR2 — Blokada dworca
+### SIGUSR2 — Blokada dworca
 
 ```bash
-killall -SIGUSR2 dispatcher
+kill -USR2 <PID_DYSPOZYTORA>
 ```
 
-**Działanie:**
-1. Dyspozytor otrzymuje sygnał
-2. Ustawia `bus->station_blocked=1` oraz `bus->shutdown=1`
-3. Przekazuje SIGUSR2 do kierowcy
-4. Nowi pasażerowie nie mogą już wejść
-5. Generator przestaje tworzyć pasażerów
-6. Kierowcy kończą pracę po powrocie z kursu
-7. Kasa kończy pracę po sprawdzeniu flagi shutdown
-8. Logowane jako `[DYSPOZYTOR] Blokada dworca`
+**Efekt**: 
+1. Dworzec zostaje zablokowany (`station_blocked = 1`)
+2. Nie mogą powstawać nowi pasażerowie
+3. Obecni pasażerowie mogą dokończyć jazdę
+4. System kończy pracę po powrocie ostatniego autobusu
 
-**Zastosowanie:** Kontrolowane zamknięcie dworca z zachowaniem bezpieczeństwa pasażerów
-
----
-
-#### SIGINT — Shutdown systemu
+### SIGINT (Ctrl+C) — Graceful shutdown
 
 ```bash
-# W terminalu z uruchomionym programem:
+# W terminalu z uruchomionym systemem
 Ctrl+C
 ```
 
-**Działanie:**
-1. Main otrzymuje SIGINT
-2. Ustawia `bus->shutdown=1`, `bus->station_blocked=1`
-3. Przekazuje SIGINT do dyspozytora
-4. Wszystkie procesy sprawdzają flag shutdown przed każdą operacją
-5. Kierowcy kończą bieżącą trasę i przestają akceptować nowych pasażerów
-6. Generator przestaje tworzyć pasażerów
-7. Kasa kończy działanie
-8. Main czeka na zakończenie wszystkich procesów potomnych (`wait()`)
-9. Czyszczenie zasobów IPC:
-   - `shmctl(IPC_RMID)` — usunięcie pamięci dzielonej
-   - `semctl(IPC_RMID)` — usunięcie semaforów
-   - `msgctl(IPC_RMID)` — usunięcie kolejki komunikatów
-10. Usunięcie plików kluczy (`unlink()`)
-
-**Zastosowanie:** Bezpieczne zakończenie całego systemu
+**Efekt**:
+1. Ustawienie flag `shutdown` i `station_blocked`
+2. Powiadomienie wszystkich procesów
+3. Zakończenie generatora i kasy
+4. Oczekiwanie na powrót aktywnych autobusów
+5. Czyszczenie zasobów IPC
 
 ---
 
 ## 🔐 Mechanizmy synchronizacji
 
-### Semafory (4 semafory w zestawie)
+### Semafory (System V)
 
-| Indeks | Początkowa wartość | Przeznaczenie |
-|--------|-------------------|---------------|
-| **0** | 1 | **Mutex** — ochrona pamięci dzielonej (struktura BusState) |
-| **1** | 1 | **Bramka bez roweru** — synchronizacja wejścia pasażerów bez roweru |
-| **2** | 1 | **Bramka z rowerem** — synchronizacja wejścia pasażerów z rowerem |
-| **3** | 1 | **Dworzec** — dostęp do dworca (tylko 1 autobus jednocześnie) |
+System wykorzystuje **6 semaforów**:
 
-**Operacje semaforowe:**
-- `sem_lock()` — P(sem) — zmniejszenie o 1 (oczekiwanie jeśli 0)
-- `sem_unlock()` — V(sem) — zwiększenie o 1 (odblokowanie)
-- `gate_lock(gate)` — blokada konkretnej bramki
-- `gate_unlock(gate)` — odblokowanie bramki
+| Indeks | Nazwa | Inicjalna wartość | Funkcja |
+|--------|-------|-------------------|---------|
+| **0** | `mutex` | 1 | Ochrona pamięci dzielonej (`BusState`) |
+| **1** | `gate_bike` | 1 | Bramka dla pasażerów z rowerami |
+| **2** | `gate_normal` | 1 | Bramka dla pasażerów bez rowerów |
+| **3** | `dworzec` | 1 | Ograniczenie do jednego autobusu na dworcu |
+| **4** | `waiting_passengers` | 0 | (Nieużywany w obecnej wersji) |
+| **5** | `generator_limit` | `MAX_PASSENGERS` | Limit aktywnych procesów pasażerów |
 
----
-
-### Pamięć dzielona (struktura `BusState`)
+### Pamięć dzielona (struct BusState)
 
 ```c
 struct BusState {
-    int P;                      // Maksymalna liczba pasażerów
-    int R;                      // Maksymalna liczba rowerów
-    int T;                      // Czas oczekiwania na dworcu
-    int N;                      // Liczba autobusów
-    int passengers;             // Aktualna liczba pasażerów w autobusie
-    int bikes;                  // Aktualna liczba rowerów w autobusie
-    int departing;              // Flaga: autobus odjeżdża (0/1)
-    int station_blocked;        // Flaga: dworzec zablokowany (0/1)
-    int active_passengers;      // Liczba aktywnych pasażerów w systemie
-    int boarded_passengers;     // Liczba pasażerów, którzy weszli do autobusu
-    pid_t driver_pid;           // PID aktualnego kierowcy na dworcu
-    int shutdown;               // Flaga: system się wyłącza (0/1)
+    /* Konfiguracja */
+    int P, R, T, N;
+    
+    /* Stan autobusu na dworcu */
+    int passengers;           // Aktualna liczba pasażerów
+    int bikes;                // Aktualna liczba rowerów
+    int departing;            // Flaga odjazdu (blokada wsiadań)
+    
+    /* Stan globalny */
+    int station_blocked;      // Dworzec zablokowany
+    int shutdown;             // System się kończy
+    int active_passengers;    // Liczba wszystkich aktywnych pasażerów
+    int boarded_passengers;   // Łączna liczba pasażerów którzy wsiedli
+    pid_t driver_pid;         // PID kierowcy na dworcu
+    
+    /* Lista pasażerów */
+    pid_t passenger_list[MAX_BUS_CAPACITY];
+    int passenger_count;
 };
 ```
-
-**Dostęp do pamięci dzielonej:**
-- Zawsze chroniony przez mutex (semafor 0)
-- Operacje atomowe: `sem_lock()` → modyfikacja → `sem_unlock()`
-- Przykład: `sem_lock(); bus->passengers++; sem_unlock();`
-
----
 
 ### Kolejka komunikatów
 
-**Typy wiadomości:**
-- `MSG_REGISTER (1)` — Rejestracja pasażera w kasie (wysyła pasażer)
-- `MSG_TICKET_REPLY + PID` — Unikalny typ odpowiedzi dla każdego pasażera (wysyła kasa)
+**Typy wiadomości**:
+- `MSG_REGISTER (1)` — Rejestracja pasażera w kasie
+- `MSG_TICKET_REPLY + PID` — Odpowiedź z biletem dla konkretnego pasażera
+- `MSG_BUS_RETURNED + PID` — Powiadomienie o powrocie autobusu (dla pasażerów)
 
-**Struktura wiadomości:**
-```c
-struct msg {
-    long type;          // Typ wiadomości
-    pid_t pid;          // PID pasażera
-    int vip;            // Czy VIP (0/1)
-    int bike;           // Czy ma rower (0/1)
-    int child;          // Czy dziecko (0/1)
-    int ticket_ok;      // Czy bilet zatwierdzony (0/1)
-};
-```
+### Wątki pthread (dla dzieci)
 
-**Schemat komunikacji:**
-1. Pasażer → `msgsnd(MSG_REGISTER)` → Kasa
-2. Kasa → Sprawdzenie danych → `msgsnd(MSG_TICKET_REPLY + PID)` → Pasażer
-3. Pasażer → `msgrcv(MSG_TICKET_REPLY + PID)` → Otrzymanie biletu
-
----
-
-### Pipe (komunikacja rodzic-dziecko)
-
-Wykorzystywany **tylko** dla synchronizacji dorosłego z dzieckiem:
-
-```c
-int pipefd[2];
-pipe(pipefd);
-
-pid_t cpid = fork();
-if (cpid == 0) {
-    // Proces dziecka
-    close(pipefd[1]);
-    char buf;
-    read(pipefd[0], &buf, 1);  // Czeka na sygnał od rodzica
-    close(pipefd[0]);
-    // Wchodzi przez bramkę
-} else {
-    // Proces rodzica
-    close(pipefd[0]);
-    // ... próbuje wsiąść ...
-    write(pipefd[1], "X", 1);  // Sygnał dla dziecka
-    close(pipefd[1]);
-}
-```
-
-**Cel:** Zapewnienie, że dziecko wchodzi **równocześnie** z rodzicem (nie przed, nie po)
+Pasażer z dzieckiem tworzy **wątek potomny**:
+- **Rodzic** zarządza procesem wsiadania
+- **Dziecko** czeka na synchronizację przez `pthread_mutex` i `pthread_cond`
+- Po udanym wejściu rodzic budzi dziecko sygnałem condition variable
 
 ---
 
@@ -392,742 +284,434 @@ if (cpid == 0) {
 
 ### 1. Inicjalizacja (main.c)
 
-```
-main
- ├── Tworzenie plików kluczy (SHM_PATH, SEM_PATH, MSG_PATH)
- ├── Inicjalizacja IPC (shmget, semget, msgget)
- ├── Ustawienie semaforów (0:1, 1:1, 2:1, 3:1)
- ├── fork() → driver (x N razy)
- ├── fork() → cashier
- ├── fork() → dispatcher
- ├── fork() → passenger_generator
- └── wait() — czekanie na zakończenie wszystkich procesów
-```
-
----
-
-### 2. Generator pasażerów (passenger_generator.c)
-
-```
-Pętla nieskończona:
-    ↓
-Losowy sleep(1-3 sekundy)
-    ↓
-Sprawdzenie shutdown/station_blocked → KONIEC jeśli TAK
-    ↓
-sem_lock()
-bus->active_passengers++
-sem_unlock()
-    ↓
-fork() → passenger
-    ↓
-Powrót do początku pętli
+```mermaid
+graph TD
+    A[Start main] --> B[Parsowanie argumentów N P R T]
+    B --> C[Tworzenie plików kluczy IPC]
+    C --> D[Alokacja pamięci dzielonej]
+    D --> E[Inicjalizacja semaforów]
+    E --> F[Tworzenie kolejki komunikatów]
+    F --> G[Fork N kierowców]
+    G --> H[Fork kasjera]
+    H --> I[Fork dyspozytora]
+    I --> J[Fork generatora]
+    J --> K[Oczekiwanie na zakończenie]
+    K --> L[Cleanup IPC]
+    L --> M[Koniec]
 ```
 
-**Zakończenie:** Po otrzymaniu flagi `shutdown=1` lub `station_blocked=1`
+### 2. Cykl pracy autobusu (driver.c)
 
----
-
-### 3. Pasażer (passenger.c)
-
-```
-Losowanie cech:
-    - VIP (1%)
-    - rower (50%)
-    - wiek (0-79)
-    - z_dzieckiem (20% dla dorosłych)
-    ↓
-Sprawdzenie: dworzec otwarty? → NIE → KONIEC
-    ↓
-Dziecko < 8 lat? → TAK → "Bez opiekuna - odmowa" → KONIEC
-    ↓
-Rejestracja w kasie:
-    msgsnd(MSG_REGISTER, {pid, vip, bike, child=0})
-    ↓
-VIP? → TAK → Pomijamy czekanie na bilet
-    ↓ NIE
-Czekanie na bilet:
-    msgrcv(MSG_TICKET_REPLY + PID)
-    ↓
-Dorosły z dzieckiem? → TAK → fork() + pipe + synchronizacja
-    ↓ NIE
-Pętla próby wejścia:
-    ├── try_board(bike, with_child, vip)
-    ├──── gate_lock(1 lub 2)
-    ├──── sem_lock()
-    ├──── Sprawdzenie: shutdown? departing? miejsca?
-    ├──── Wejście: bus->passengers += needed
-    ├──── sem_unlock()
-    ├──── gate_unlock()
-    ├── Sukces? → TAK → Logowanie wsiadł → KONIEC
-    ├── Brak miejsca? → sleep(1) → Powtórz
-    └── Shutdown? → KONIEC
-    ↓
-sem_lock()
-bus->active_passengers--
-sem_unlock()
+```mermaid
+graph TD
+    A[Start kierowcy] --> B[Zajęcie dworca gate3]
+    B --> C[Ustawienie driver_pid]
+    C --> D[Czekanie T sekund lub SIGUSR1]
+    D --> E{Force flag?}
+    E -->|Nie| D
+    E -->|Tak lub T upłynął| F[Zamknięcie bramek 1,2]
+    F --> G[Ustawienie departing=1]
+    G --> H[Odczyt liczby pasażerów]
+    H --> I[Reset liczników]
+    I --> J[Zwolnienie bramek i dworca]
+    J --> K[Jazda sleep 3-9s]
+    K --> L[Powiadomienie pasażerów]
+    L --> M{Shutdown?}
+    M -->|Nie| B
+    M -->|Tak| N[Koniec]
 ```
 
----
+### 3. Proces pasażera (passenger.c)
 
-### 4. Kierowca (driver.c)
-
+```mermaid
+graph TD
+    A[Start pasażera] --> B[Losowanie cech: VIP, rower, wiek, dziecko]
+    B --> C{Dworzec zablokowany?}
+    C -->|Tak| Z[Koniec - brak dostępu]
+    C -->|Nie| D{Wiek < 8?}
+    D -->|Tak| Z
+    D -->|Nie| E[Inkrementacja active_passengers]
+    E --> F{VIP?}
+    F -->|Nie| G[Wysłanie MSG_REGISTER]
+    G --> H[Czekanie na bilet]
+    H --> I{Shutdown?}
+    F -->|Tak| I
+    I -->|Tak| Z
+    I -->|Nie| J{Dziecko?}
+    J -->|Tak| K[Utworzenie wątku dziecka]
+    J -->|Nie| L[Pętla prób wejścia]
+    K --> L
+    L --> M{try_board sukces?}
+    M -->|Nie| N[Sleep 1s]
+    N --> O{Shutdown?}
+    O -->|Tak| Z
+    O -->|Nie| L
+    M -->|Tak| P[Logowanie wejścia]
+    P --> Q{Dziecko?}
+    Q -->|Tak| R[Sygnał do wątku dziecka]
+    Q -->|Nie| S[Czekanie na MSG_BUS_RETURNED]
+    R --> S
+    S --> T[Dekrementacja active_passengers]
+    T --> Z
 ```
-Pętla nieskończona:
-    ↓
-gate_lock(3) — Blokada dworca (tylko 1 autobus)
-    ↓
-sem_lock()
-bus->driver_pid = getpid()
-bus->departing = 0
-wait_time = bus->T
-sem_unlock()
-    ↓
-Sprawdzenie shutdown/station_blocked → KONIEC jeśli TAK
-    ↓
-Logowanie: "Autobus na dworcu"
-    ↓
-Czekanie T sekund (lub force_flag):
-    while (!force_flag && waited < wait_time)
-        sleep(1)
-        waited++
-        Sprawdzenie shutdown → KONIEC jeśli TAK
-    ↓
-force_flag = 0
-    ↓
-Blokada obu bramek:
-    gate_lock(1)
-    gate_lock(2)
-    ↓
-sem_lock()
-bus->departing = 1
-p = bus->passengers
-r = bus->bikes
-bus->boarded_passengers += p
-sem_unlock()
-    ↓
-Logowanie: "Odjazd: p pasażerów, r rowerów"
-    ↓
-Reset liczników:
-    sem_lock()
-    bus->passengers = 0
-    bus->bikes = 0
-    sem_unlock()
-    ↓
-Odblokowanie:
-    gate_unlock(1)
-    gate_unlock(2)
-    gate_unlock(3)
-    ↓
-Jazda: sleep(Ti) gdzie Ti ∈ [3,9]s
-    ↓
-Logowanie: "Powrót po Ti s"
-    ↓
-Sprawdzenie shutdown → KONIEC jeśli TAK
-    ↓
-Powrót do początku pętli
+
+### 4. Proces kasy (cashier.c)
+
+```mermaid
+graph TD
+    A[Start kasy] --> B[Podłączenie do IPC]
+    B --> C[Oczekiwanie msgrcv MSG_REGISTER]
+    C --> D{Otrzymano wiadomość?}
+    D -->|Błąd EIDRM| Z[Koniec - kolejka usunięta]
+    D -->|Błąd EINTR| C
+    D -->|Tak| E{PID == 0?}
+    E -->|Tak - wake-up| F{Shutdown?}
+    F -->|Tak| Z
+    F -->|Nie| C
+    E -->|Nie - prawdziwa wiadomość| G[Logowanie rejestracji]
+    G --> H{VIP?}
+    H -->|Tak| I{Shutdown?}
+    H -->|Nie| J[Wysłanie MSG_TICKET_REPLY]
+    J --> I
+    I -->|Tak| Z
+    I -->|Nie| C
+```
+
+### 5. Generator pasażerów (passenger_generator.c)
+
+```mermaid
+graph TD
+    A[Start generatora] --> B[Podłączenie do IPC]
+    B --> C[Sleep 1-3s]
+    C --> D{Shutdown lub station_blocked?}
+    D -->|Tak| Z[Koniec]
+    D -->|Nie| E{generator_count < MAX_PASSENGERS?}
+    E -->|Nie| F[Sleep 1s]
+    F --> D
+    E -->|Tak| G[Inkrementacja active_passengers]
+    G --> H[Fork nowego pasażera]
+    H --> I[Exec ./passenger]
+    I --> C
 ```
 
 ---
 
-### 5. Kasa (cashier.c)
+## 🧪 Testy systemu
 
-```
-Pętla nieskończona:
-    ↓
-sem_lock()
-sd = bus->shutdown
-sem_unlock()
-    ↓
-Jeśli sd → KONIEC
-    ↓
-msgrcv(MSG_REGISTER, IPC_NOWAIT)
-    ↓
-Brak wiadomości? → sleep krótko → Powrót do początku
-    ↓
-Znaleziono wiadomość → Logowanie rejestracji
-    ↓
-VIP lub dziecko? → TAK → Pomijamy wysyłanie biletu
-    ↓ NIE
-Wysłanie biletu:
-    m.ticket_ok = 1
-    m.type = MSG_TICKET_REPLY + m.pid
-    msgsnd(msgid, m)
-    ↓
-Powrót do początku pętli
-```
+### Test 1: Równoczesne wejście pasażerów z rowerami
 
-**Zakończenie:** Po otrzymaniu flagi `shutdown=1`
+**Cel**: Weryfikacja poprawnego zarządzania dwoma zasobami jednocześnie: miejscami dla pasażerów i miejscami na rowery.
+
+**Dane wejściowe**: `N=3, P=20, R=5, T=5`
+
+**Przebieg**:
+- Generator tworzy głównie pasażerów z rowerami
+- Kilku pasażerów próbuje wejść jednocześnie
+- Sprawdzenie, czy nie zostaje przekroczony limit rowerów
+- Obserwacja stanu pamięci współdzielonej
+
+**Rezultat**: ✅ **Pozytywny**. Limit rowerów nigdy nie zostaje przekroczony. Nadmiarowi pasażerowie czekają na kolejny kurs.
+
+**Przykładowe fragmenty logów**:
+```
+[21:22:38] [KIEROWCA 142472] Autobus na dworcu
+[21:22:38] [PASAZER 142591] Wsiadl (VIP=0 rower=1)
+[21:22:38] [PASAZER 142596] Wsiadl (VIP=0 rower=1)
+[21:22:38] [PASAZER 142597] Wsiadl (VIP=0 rower=1)
+[21:22:39] [PASAZER 142567] Wsiadl (VIP=0 rower=1)
+[21:22:39] [DOROSLY+DZIECKO 142568] Wsiadl (VIP=0 rower=1)
+[21:22:43] [KIEROWCA 142472] Odjazd: 6 pasazerow, 5 rowerow
+```
 
 ---
 
-### 6. Dyspozytor (dispatcher.c)
+### Test 2: Czy pasażerowie VIP pomijają kasę
 
-```
-Rejestracja handlerów sygnałów:
-    - SIGINT → handle_int → shutdown=1, station_blocked=1
-    - SIGUSR1 → handle_usr1 → kill(driver_pid, SIGUSR1)
-    - SIGUSR2 → handle_usr2 → shutdown=1, station_blocked=1, kill(driver_pid, SIGUSR2)
-    ↓
-Pętla nieskończona:
-    pause() — czekanie na sygnał
-    ↓
-should_exit? → TAK → KONIEC
-    ↓
-Powrót do początku pętli
-```
+**Cel**: Weryfikacja, czy pasażerowie VIP mogą wejść do autobusu z pominięciem kasy, nawet gdy proces kasjera jest niedostępny.
 
-**Zakończenie:** Po otrzymaniu SIGINT lub SIGUSR2 (ustawia `should_exit=1`)
+**Dane wejściowe**: `N=2, P=12, R=3, T=3`
+
+**Przebieg**:
+- Proces kasy zostaje celowo uśpiony na 1 minutę
+- W tym czasie generator tworzy nowych pasażerów
+- Zwykli pasażerowie nie mogą przejść procesu rejestracji ani wejść do autobusu
+- Pasażerowie VIP omijają kasę i mogą wejść do autobusu
+- Obserwacja logów wejścia pasażerów oraz aktywności procesu kasy
+
+**Rezultat**: ✅ **Pozytywny**. W czasie uśpienia kasy zwykli pasażerowie pozostają zablokowani, natomiast pasażerowie VIP mogą normalnie wejść do autobusu. Po wznowieniu pracy kasy zwykli pasażerowie są obsługiwani standardowo.
+
+**Przykładowe fragmenty logów**:
+```
+[22:04:54] [PASAZER 146189] Przybycie (VIP=0 wiek=66 rower=0 dziecko=1)
+[22:04:55] [PASAZER 146212] Przybycie (VIP=1 wiek=28 rower=1 dziecko=0)
+[22:04:55] [PASAZER 146212] Wsiadl (VIP=1 rower=1)
+[22:04:58] [KIEROWCA 146122] Odjazd: 1 pasazerow, 1 rowerow
+[22:04:59] [KIEROWCA 146123] Autobus na dworcu
+[22:04:59] [PASAZER 146217] Wsiadl (VIP=1 rower=1)
+[22:05:02] [KIEROWCA 146122] Powrot po 4s
+[22:05:02] [KIEROWCA 146122] Rozwieziono pasazerow: [146212]
+```
 
 ---
 
-## ✅ Przykładowe testy
+### Test 3: Race condition przy natychmiastowym odjeździe autobusu
 
-# Testy - System zarządzania autobusami
+**Cel**: Sprawdzenie spójności stanu systemu, gdy autobus odjeżdża w chwili aktywnego wsiadania pasażerów.
 
-## Test 1: Maksymalne wypełnienie autobusu - race condition
+**Dane wejściowe**: `N=1, P=10, R=5, T=5`
 
-**Cel**: Sprawdzenie czy dokładnie P pasażerów wsiada, nawet gdy więcej próbuje jednocześnie
+**Przebieg**:
+- W trakcie masowego wsiadania dyspozytor wysyła sygnał SIGUSR1 (natychmiastowy odjazd)
+- Proces kierowcy ustawia flagę `departing = 1`
+- Weryfikacja, czy żaden pasażer nie pozostaje w stanie pośrednim
+- Sprawdzenie atomowości operacji wsiadania
 
-**Parametry**: `./main 1 5 2 10`
-- 1 autobus
-- 5 miejsc
-- 2 rowery
-- 10 sekund czasu oczekiwania
+**Rezultat**: ✅ **Pozytywny**. Każdy pasażer kończy operację w sposób atomowy: albo wsiada i jest na liście `passenger_list`, albo nie wsiada i pozostaje na przystanku.
 
-**Scenariusz**: 
-- Generator tworzy pasażerów w krótkim czasie (1-3s)
-- Wszyscy próbują wsiąść do jednego małego autobusu
-- Część będzie musiała czekać na następny kurs
-
-**Przykładowe logi (fragment)**:
+**Przykładowe fragmenty logów**:
 ```
-[14:23:10] [KIEROWCA 1001] Autobus na dworcu
-[14:23:11] [PASAZER 2001] Przybycie (VIP=0 wiek=25 rower=0 dziecko=0)
-[14:23:11] [PASAZER 2001] Wsiadl (VIP=0 rower=0)
-[14:23:12] [PASAZER 2002] Przybycie (VIP=0 wiek=30 rower=1 dziecko=0)
-[14:23:12] [PASAZER 2002] Wsiadl (VIP=0 rower=1)
-[14:23:13] [PASAZER 2003] Przybycie (VIP=0 wiek=45 rower=0 dziecko=0)
-[14:23:13] [PASAZER 2003] Wsiadl (VIP=0 rower=0)
-[14:23:13] [PASAZER 2004] Przybycie (VIP=0 wiek=35 rower=1 dziecko=0)
-[14:23:13] [PASAZER 2004] Wsiadl (VIP=0 rower=1)
-[14:23:14] [PASAZER 2005] Przybycie (VIP=0 wiek=50 rower=0 dziecko=0)
-[14:23:14] [PASAZER 2005] Wsiadl (VIP=0 rower=0)
-[14:23:14] [PASAZER 2006] Przybycie (VIP=0 wiek=28 rower=0 dziecko=0)
-[14:23:14] [PASAZER 2007] Przybycie (VIP=0 wiek=33 rower=1 dziecko=0)
-[14:23:24] [KIEROWCA 1001] Odjazd: 5 pasazerow, 2 rowerow
-[14:23:24] [KIEROWCA 1001] Autobus na dworcu (wrócił po trasie)
-[14:23:25] [PASAZER 2006] Wsiadl (VIP=0 rower=0)
-[14:23:25] [PASAZER 2007] Wsiadl (VIP=0 rower=1)
+[22:58:50] [KIEROWCA 151678] Autobus na dworcu
+[22:58:50] [PASAZER 151685] Wsiadl (VIP=0 rower=1)
+[22:58:50] [PASAZER 151683] Wsiadl (VIP=0 rower=1)
+[22:58:50] [PASAZER 151686] Wsiadl (VIP=0 rower=1)
+[22:58:50] [PASAZER 151687] Wsiadl (VIP=0 rower=0)
+[22:58:52] [PASAZER 151689] Wsiadl (VIP=0 rower=1)
+[22:58:52] [DYSPOZYTOR] Wymuszenie odjazdu
+[22:58:52] [KIEROWCA 151678] Odjazd: 5 pasazerow, 4 rowerow
+[22:59:01] [KIEROWCA 151678] Powrot po 9s
+[22:59:01] [KIEROWCA 151678] Rozwieziono pasazerow: [151685, 151683, 151686, 151687, 151689]
 ```
-
-**Weryfikacja**: 
-- ✅ Pierwszy odjazd: DOKŁADNIE 5 pasażerów i 2 rowery
-- ✅ Pasażerowie 2006 i 2007 czekają na następny autobus
-- ✅ Brak przekroczenia limitu P=5, R=2
 
 ---
 
-## Test 2: Wielokrotny Ctrl+Z podczas aktywnego ruchu
+### Test 4: Jednoczesny powrót wielu autobusów na dworzec
 
-**Cel**: Sprawdzenie odporności na zawieszanie/wznawianie procesu głównego
+**Cel**: Sprawdzenie synchronizacji w sytuacji, gdy kilkadziesiąt autobusów próbuje niemal równocześnie wjechać na przystanek (dworzec).
 
-**Parametry**: `./main 3 10 5 8`
+**Dane wejściowe**: `N=30, P=20, R=10, T=3` (pomijamy T - testowane na wersji bez sleep)
 
-**Scenariusz**:
-1. Uruchom system
-2. Poczekaj aż kilku pasażerów zacznie wsiadać
-3. Naciśnij **Ctrl+Z** (zatrzymanie)
-4. Poczekaj 5 sekund
-5. Wznów przez **fg**
-6. Powtórz 3-4 razy
-7. Naciśnij Ctrl+C (shutdown)
+**Przebieg**:
+- Kilkadziesiąt autobusów wraca w tym samym momencie
+- Wszystkie próbują zająć semafor `gate[3]` (SEM_DWORZEC)
+- Obserwacja kolejki oczekujących procesów
 
-**Przykładowe logi**:
+**Rezultat**: ✅ **Pozytywny**. Autobusy ustawiają się w kolejce systemowej. W danym momencie na przystanku znajduje się dokładnie jeden autobus (chroni to semafor `gate[3]`).
+
+**Przykładowe fragmenty logów**:
 ```
-[15:10:15] [KIEROWCA 3001] Autobus na dworcu
-[15:10:16] [PASAZER 4001] Wsiadl (VIP=0 rower=1)
-[15:10:17] [PASAZER 4002] Wsiadl (VIP=0 rower=0)
-^Z
-[1]+  Stopped                 ./main 3 10 5 8
-
-(czekamy 5 sekund, potem fg)
-
-[15:10:23] [PASAZER 4003] Wsiadl (VIP=0 rower=0)
-[15:10:24] [KIEROWCA 3001] Odjazd: 3 pasazerow, 1 rowerow
-[15:10:25] [KIEROWCA 3002] Autobus na dworcu
-[15:10:26] [PASAZER 4004] Wsiadl (VIP=0 rower=1)
-^Z
-[1]+  Stopped                 ./main 3 10 5 8
-
-(znowu fg)
-
-[15:10:35] [KIEROWCA 3001] Powrot po 4s
-[15:10:36] [PASAZER 4005] Wsiadl (VIP=0 rower=0)
+[01:14:58] [KIEROWCA 164699] Autobus na dworcu
+[01:14:58] [KIEROWCA 164699] Odjazd: 0 pasazerow, 0 rowerow
+[01:14:58] [KIEROWCA 164699] Powrot po 6s
+[01:14:58] [KIEROWCA 164719] Autobus na dworcu
+[01:14:58] [KIEROWCA 164719] Odjazd: 0 pasazerow, 0 rowerow
+[01:14:58] [KIEROWCA 164719] Powrot po 3s
+[01:14:58] [KIEROWCA 164704] Autobus na dworcu
+[01:14:58] [PASAZER 164795] Wsiadl (VIP=0 rower=1)
+[01:14:58] [KIEROWCA 164704] Odjazd: 1 pasazerow, 1 rowerow
 ```
-
-**Weryfikacja**:
-- ✅ System kontynuuje działanie po każdym fg
-- ✅ Brak "Odjazd: 0 pasazerow" (co by oznaczało zdublowane autobusy)
-- ✅ Kolejność logów jest spójna
-- ✅ Brak deadlocków na semaforach
 
 ---
 
-## Test 3: Rodzice z dziećmi - ekstremalna synchronizacja
+### Test 5: Interwencja Dyspozytora – zamknięcie systemu (SIGUSR2)
 
-**Cel**: Test synchronizacji procesów rodzic-dziecko
+**Cel**: Weryfikacja mechanizmu kaskadowego zamykania systemu podczas trwającego kursu autobusu. Sprawdzenie, czy sygnał SIGUSR2 dociera do wszystkich procesów, czy poprawnie synchronizują się przez mechanizmy IPC oraz czy każdy proces odłącza się od pamięci współdzielonej przed zakończeniem pracy.
 
-**Parametry**: `./main 2 6 3 15`
+**Dane wejściowe**: `N=1, P=10, R=5, T=5`
 
-**Scenariusz**: 
-- Modyfikujemy generator aby tworzył TYLKO pasażerów z dziećmi (100% zamiast 20%)
-- Każdy rodzic+dziecko zajmuje 2 miejsca
-- Autobus pomieści tylko 3 pary
+**Przebieg**:
+- Uruchomienie symulacji i doprowadzenie do stanu, w którym autobus znajduje się w trasie, a w systemie aktywnych jest wiele procesów pasażerów
+- Wysłanie sygnału zamknięcia przez Dyspozytora (SIGUSR2)
+- Proces Main ustawia flagi `shutdown` i `station_blocked` w pamięci współdzielonej i rozsyła sygnał do grup procesów
+- Procesy synchronizują zakończenie pracy przy użyciu semaforów IPC i kończą bieżące operacje atomowo
+- Autobus będący w trasie kończy kurs i zwalnia zasoby współdzielone
+- Każdy proces wykonuje `shmdt` i kończy działanie
+- Weryfikacja końcowa: sprawdzenie usunięcia pamięci współdzielonej i semaforów oraz braku procesów zombie
 
-**Przykładowe logi**:
+**Rezultat**: ✅ **Pozytywny**. Sygnał SIGUSR2 dociera do wszystkich procesów. System wykonuje kontrolowane zamknięcie: autobus kończy bieżący kurs, procesy poprawnie odłączają się od zasobów IPC, a pamięć współdzielona i semafory zostają usunięte przez proces Main. Brak procesów-zombie.
+
+**Przykładowe fragmenty logów**:
 ```
-[12:59:37] [DOROSLY+DZIECKO 2744158] Wsiadl (VIP=0 rower=1)
-[12:59:37] [DOROSLY+DZIECKO 2744046] Wsiadl (VIP=0 rower=0)
-[12:59:37] [DOROSLY+DZIECKO 2744058] Wsiadl (VIP=0 rower=0)
-[12:59:37] [PASAZER 2744180] Przybycie (VIP=0 wiek=56 rower=1 dziecko=1)
-[12:59:37] [PASAZER 2744181] Przybycie (VIP=0 wiek=28 rower=1 dziecko=1)
-[12:59:37] [PASAZER 2744182] Przybycie (VIP=0 wiek=54 rower=0 dziecko=1)
-[12:59:38] [KASA] Rejestracja PID=2744180 VIP=0 DZIECKO=0
-[12:59:38] [KASA] Rejestracja PID=2744182 VIP=0 DZIECKO=0
-[12:59:38] [KASA] Rejestracja PID=2744181 VIP=0 DZIECKO=0
-[12:59:38] [PASAZER 2744184] Przybycie (VIP=0 wiek=77 rower=1 dziecko=1)
-[12:59:39] [KASA] Rejestracja PID=2744184 VIP=0 DZIECKO=0
-[12:59:39] [PASAZER 2744188] Przybycie (VIP=0 wiek=60 rower=0 dziecko=1)
-[12:59:40] [KASA] Rejestracja PID=2744188 VIP=0 DZIECKO=0
-[12:59:41] [KIEROWCA 2743949] Powrot po 7s
-[12:59:42] [KIEROWCA 2743950] Odjazd: 6 pasazerow, 1 rowerow
+[23:02:59] [KIEROWCA 152050] Odjazd: 7 pasazerow, 1 rowerow
+[23:03:00] [PASAZER 152064] Przybycie (VIP=0 wiek=6 rower=0 dziecko=0)
+[23:03:00] [PASAZER 152065] Przybycie (VIP=0 wiek=9 rower=0 dziecko=0)
+[23:03:01] [MAIN] Shutdown initiated
+[23:03:01] [DYSPOZYTOR] SIGINT - rozpoczynam shutdown systemu
+[23:03:01] [DYSPOZYTOR] Blokada dworca
+[23:03:01] [DYSPOZYTOR] Koniec pracy
+[23:03:01] [KASA] Otrzymano shutdown - koniec pracy
+[23:03:01] [KASA] Koniec pracy
+[23:03:02] [GENERATOR] Koniec pracy
+[23:03:08] [KIEROWCA 152050] Powrot po 9s
+[23:03:08] [KIEROWCA 152050] Rozwieziono pasazerow: [152061, 152059, dziecko_152059, 152057, dziecko_152057, 152062, 152063]
+[23:03:08] [KIEROWCA 152050] Koniec pracy
+[23:03:08] [MAIN] Zakonczono 4 procesow
+[23:03:08] [MAIN] System zakończony
 ```
 
-**Weryfikacja**:
-- ✅ Odjazd: 6 pasażerów (3 pary × 2 miejsca)
-- ✅ Każde "DOROSLY+DZIECKO" zajmuje dokładnie 2 miejsca
-- ✅ Czwarta para czeka na następny autobus
-- ✅ Brak wpisów "[DZIECKO XXX] Bez opiekuna" (dzieci są z rodzicami)
+**Weryfikacja zasobów po zakończeniu**:
+```bash
+$ ipcs
+
+------ Message Queues --------
+key        msqid      owner      perms      used-bytes   messages    
+
+------ Shared Memory Segments --------
+key        shmid      owner      perms      bytes      nattch     status      
+
+------ Semaphore Arrays --------
+key        semid      owner      perms      nsems
+```
 
 ---
 
-## Test 4: SIGUSR1 - wymuszenie odjazdu w krytycznym momencie
+## 🛠️ Użyte mechanizmy systemowe
 
-**Cel**: Test wymuszenia odjazdu gdy pasażerowie wsiadają
+### System V IPC
 
-**Parametry**: `./main 2 10 5 20`
+| Mechanizm | Zastosowanie | Funkcje |
+|-----------|--------------|---------|
+| **Pamięć dzielona** | Współdzielenie stanu `BusState` | `shmget()`, `shmat()`, `shmdt()`, `shmctl()` |
+| **Semafory** | Synchronizacja dostępu (mutex, bramki, dworzec) | `semget()`, `semop()`, `semctl()` |
+| **Kolejka komunikatów** | Rejestracja pasażerów, wysyłka biletów | `msgget()`, `msgsnd()`, `msgrcv()`, `msgctl()` |
 
-**Scenariusz**:
-1. Uruchom system
-2. Poczekaj aż 3-4 pasażerów wsiądzie
-3. Wyślij `kill -SIGUSR1 <PID_DYSPOZYTORA>` (natychmiastowy odjazd)
-4. Sprawdź czy autobus odjeżdża z tymi pasażerami
+### POSIX Signals
 
-**Przykładowe logi**:
-```
-[17:30:10] [KIEROWCA 7001] Autobus na dworcu
-[17:30:12] [PASAZER 8001] Wsiadl (VIP=0 rower=0)
-[17:30:13] [PASAZER 8002] Wsiadl (VIP=0 rower=1)
-[17:30:14] [PASAZER 8003] Wsiadl (VIP=0 rower=0)
-[17:30:15] [DYSPOZYTOR] Wymuszenie odjazdu
-[17:30:15] [KIEROWCA 7001] Odjazd: 3 pasazerow, 1 rowerow
-[17:30:15] [KIEROWCA 7002] Autobus na dworcu
-[17:30:16] [PASAZER 8004] Przybycie (VIP=0 wiek=45 rower=0 dziecko=0)
-[17:30:17] [PASAZER 8004] Wsiadl (VIP=0 rower=0)
-```
+| Sygnał | Handler | Zastosowanie |
+|--------|---------|--------------|
+| **SIGINT** | `handle_sigint()` | Graceful shutdown (Ctrl+C) |
+| **SIGUSR1** | `handle_usr1()` | Wymuszenie odjazdu autobusu |
+| **SIGUSR2** | `handle_usr2()` | Blokada dworca |
+| **SIGCHLD** | `handle_sigchld()` | Zbieranie procesów zombie |
 
-**Weryfikacja**:
-- ✅ Autobus odjeżdża NATYCHMIAST po SIGUSR1 (nie czeka T=20s)
-- ✅ Zabiera pasażerów którzy już wsiedli (3 osoby, 1 rower)
-- ✅ Następny autobus natychmiast wjeżdża
-- ✅ Nowi pasażerowie wsiadają do nowego autobusu
+### POSIX Threads
 
----
+| Mechanizm | Zastosowanie | Funkcje |
+|-----------|--------------|---------|
+| **pthread_create** | Tworzenie wątku dla dziecka | `pthread_create()` |
+| **pthread_mutex** | Synchronizacja dostępu do logów | `pthread_mutex_lock()`, `pthread_mutex_unlock()` |
+| **pthread_cond** | Synchronizacja rodzic-dziecko przy wsiadaniu | `pthread_cond_wait()`, `pthread_cond_signal()` |
+| **pthread_join** | Oczekiwanie na zakończenie wątku | `pthread_join()` |
 
-## Test 5: SIGUSR2 - blokada dworca gdy autobusy są w trasie
+### Zarządzanie procesami
 
-**Cel**: Test graceful shutdown gdy część autobusów jest w trasie
-
-**Parametry**: `./main 3 8 4 10`
-
-**Scenariusz**:
-1. Uruchom system
-2. Poczekaj aż 2 autobusy będą w trasie (po logu "Odjazd")
-3. Wyślij `kill -SIGUSR2 <PID_DYSPOZYTORA>`
-4. Sprawdź czy wszystkie autobusy bezpiecznie kończą trasy
-
-**Przykładowe logi**:
-```
-[18:15:10] [KIEROWCA 9001] Odjazd: 8 pasazerow, 3 rowerow
-[18:15:12] [KIEROWCA 9002] Odjazd: 7 pasazerow, 4 rowerow
-[18:15:13] [KIEROWCA 9003] Autobus na dworcu
-[18:15:14] [DYSPOZYTOR] Blokada dworca
-[18:15:14] [DYSPOZYTOR] Koniec pracy
-[18:15:14] [KIEROWCA 9003] Koniec pracy
-[18:15:14] [KASA] Koniec pracy
-[18:15:14] [GENERATOR] Koniec pracy
-[18:15:14] [PASAZER 10001] Dworzec zamkniety przed rejestracją
-[18:15:16] [KIEROWCA 9001] Powrot po 6s
-[18:15:16] [KIEROWCA 9001] Koniec pracy
-[18:15:18] [KIEROWCA 9002] Powrot po 6s
-[18:15:18] [KIEROWCA 9002] Koniec pracy
-[18:15:19] [MAIN] System zakonczony
-```
-
-**Weryfikacja**:
-- ✅ Autobusy w trasie (9001, 9002) kończą swoje trasy
-- ✅ Autobus na dworcu (9003) kończy natychmiast
-- ✅ Wszystkie procesy kończą się w odpowiedniej kolejności
-- ✅ Nowi pasażerowie dostają "Dworzec zamkniety"
-- ✅ Brak zombie processów
+- `fork()` — tworzenie procesów potomnych
+- `execl()` — zastąpienie obrazu procesu
+- `wait()` / `waitpid()` — oczekiwanie na zakończenie procesów
+- `kill()` — wysyłanie sygnałów między procesami
+- `getpid()` — identyfikacja procesu
 
 ---
 
-## Test 6: Minimalna pojemność - bardzo mały autobus
-
-**Cel**: Test skrajnego przypadku P=1, R=1
-
-**Parametry**: `./main 1 1 1 2`
-- 1 autobus
-- 1 miejsce (!)
-- 1 rower (!)
-- 2 sekundy czasu
-
-**Scenariusz**:
-- Generator tworzy
-- Wszyscy muszą jechać po kolei
-
-**Przykładowe logi**:
-```
-[10:41:20] [KASA] Rejestracja PID=2719399 VIP=0 DZIECKO=0
-[10:41:21] [KIEROWCA 2719392] Powrot po 3s
-[10:41:21] [KIEROWCA 2719392] Autobus na dworcu
-[10:41:21] [PASAZER 2719397] Wsiadl (VIP=0 rower=0)
-[10:41:21] [PASAZER 2719400] Przybycie (VIP=0 wiek=23 rower=0 dziecko=1)
-[10:41:22] [KASA] Rejestracja PID=2719400 VIP=0 DZIECKO=0
-[10:41:23] [KIEROWCA 2719392] Odjazd: 1 pasazerow, 0 rowerow
-[10:41:23] [PASAZER 2719402] Przybycie (VIP=0 wiek=23 rower=0 dziecko=1)
-[10:41:24] [KASA] Rejestracja PID=2719402 VIP=0 DZIECKO=0
-[10:41:24] [PASAZER 2719405] Przybycie (VIP=0 wiek=23 rower=0 dziecko=1)
-[10:41:25] [KASA] Rejestracja PID=2719405 VIP=0 DZIECKO=0
-[10:41:26] [PASAZER 2719409] Przybycie (VIP=0 wiek=58 rower=0 dziecko=0)
-[10:41:27] [KASA] Rejestracja PID=2719409 VIP=0 DZIECKO=0
-[10:41:29] [PASAZER 2719410] Przybycie (VIP=0 wiek=24 rower=0 dziecko=0)
-[10:41:30] [KASA] Rejestracja PID=2719410 VIP=0 DZIECKO=0
-[10:41:31] [PASAZER 2719467] Przybycie (VIP=0 wiek=73 rower=0 dziecko=0)
-[10:41:31] [KASA] Rejestracja PID=2719467 VIP=0 DZIECKO=0
-[10:41:32] [KIEROWCA 2719392] Powrot po 9s
-[10:41:32] [KIEROWCA 2719392] Autobus na dworcu
-[10:41:32] [PASAZER 2719472] Przybycie (VIP=0 wiek=44 rower=0 dziecko=0)
-[10:41:32] [PASAZER 2719399] Wsiadl (VIP=0 rower=0)
-```
-
-**Weryfikacja**:
-- ✅ Każdy odjazd: DOKŁADNIE 1 pasażer, 0 lub 1 rowerów
-- ✅ Pasażerowie wsiadają po kolei
-- ✅ System nie deadlockuje mimo ekstremalnych ograniczeń
-
----
-
-## Test 7: Stress test
-
-**Cel**: Stress test - symulacja bez sleepów
-
-**Parametry**: `./main 3 10 5 4`
-- 3 autobusów
-- 10 miejsc
-- 5 rowerów
-- 4 sekundy czasu (nie dotyczy gdyz sleep jest zakomentowany)
-- zmiana kodu na potrzeby testu - dodano sprawdzanie limitu procesow
-
-**Scenariusz**:
-- Generator tworzy pasażerów natychmiast z odgórnym limitem(w celu uniknięcia wyczerpania limitu procesów na urzadzeniu)
-- Autobusy odjeżdzają natychmiast i wracaja od razu
-
-**Przykładowe logi (fragment)**:
-```
-[10:46:38] [KASA] Rejestracja PID=2719891 VIP=0 DZIECKO=0
-[10:46:38] [KASA] Rejestracja PID=2719890 VIP=0 DZIECKO=0
-[10:46:38] [PASAZER 2719891] Wsiadl (VIP=0 rower=1)
-[10:46:38] [KIEROWCA 2719886] Odjazd: 1 pasazerow, 1 rowerow
-[10:46:38] [KIEROWCA 2719886] Powrot po 8s
-[10:46:38] [KIEROWCA 2719885] Autobus na dworcu
-[10:46:38] [GENERATOR] Fork PID=2719894 (zywych=5/100)
-[10:46:38] [KIEROWCA 2719885] Odjazd: 1 pasazerow, 0 rowerow
-[10:46:38] [KIEROWCA 2719885] Powrot po 4s
-[10:46:38] [PASAZER 2719890] Wsiadl (VIP=0 rower=0)
-[10:46:38] [PASAZER 2719893] Przybycie (VIP=0 wiek=32 rower=1 dziecko=0)
-[10:46:38] [KIEROWCA 2719884] Autobus na dworcu
-[10:46:38] [PASAZER 2719894] Przybycie (VIP=0 wiek=65 rower=0 dziecko=0)
-[10:46:38] [KASA] Rejestracja PID=2719894 VIP=0 DZIECKO=0
-[10:46:38] [KIEROWCA 2719884] Odjazd: 0 pasazerow, 0 rowerow
-[10:46:38] [KASA] Rejestracja PID=2719893 VIP=0 DZIECKO=0
-[10:46:38] [KIEROWCA 2719884] Powrot po 6s
-```
-
-**Weryfikacja**:
-- ✅ W KAŻDEJ chwili MAX 1 autobus na dworcu (semafor gate[3])
-- ✅ Brak nakładających się "Autobus na dworcu" bez "Odjazd"
-- ✅ Brak deadlocków
-- ✅ Limit nie jest przekraczany 
-
----
-
-## Test 8: Samymi VIPami
-
-**Cel**: Test czy VIPowie nie potrzebują biletów
-
-**Parametry**: `./main 2 10 5 10`
-
-**Scenariusz**:
-- Modyfikujemy kod aby 100% pasażerów to VIPowie (zamiast 1%)
-- VIPowie nie rejestrują się w kasie przed wejściem do autobusu
-
-
-**Przykładowe logi**:
-```
-[21:00:10] [KIEROWCA 15001] Autobus na dworcu
-[21:00:11] [PASAZER 16001] Przybycie (VIP=1 wiek=45 rower=0 dziecko=0)
-[21:00:11] [PASAZER 16001] Wsiadl (VIP=1 rower=0)
-[21:00:12] [PASAZER 16002] Przybycie (VIP=1 wiek=52 rower=1 dziecko=0)
-[21:00:12] [PASAZER 16002] Wsiadl (VIP=1 rower=1)
-[21:00:13] [PASAZER 16003] Przybycie (VIP=1 wiek=38 rower=0 dziecko=0)
-[21:00:13] [PASAZER 16003] Wsiadl (VIP=1 rower=0)
-```
-
-**Weryfikacja**:
-- ✅ BRAK logów "KASA Rejestracja" dla VIPów PRZED wejściem do autobusu
-- ✅ VIPowie wsiadają NATYCHMIAST bez czekania na bilet
-
----
-
-## Test 9: Dzieci bez opiekuna - masowe odrzucenie
-
-**Cel**: Test odrzucania dzieci poniżej 8 lat
-
-**Parametry**: `./main 2 10 5 10`
-
-**Scenariusz**:
-- Modyfikujemy generator aby tworzył tylko dzieci 0-7 lat
-- Wszystkie powinny zostać odrzucone
-
-**Przykładowe logi**:
-```
-[22:00:10] [KIEROWCA 17001] Autobus na dworcu
-[22:00:11] [PASAZER 18001] Przybycie (VIP=0 wiek=3 rower=0 dziecko=0)
-[22:00:11] [DZIECKO 18001] Bez opiekuna - odmowa
-[22:00:12] [PASAZER 18002] Przybycie (VIP=0 wiek=5 rower=1 dziecko=0)
-[22:00:12] [DZIECKO 18002] Bez opiekuna - odmowa
-[22:00:13] [PASAZER 18003] Przybycie (VIP=0 wiek=7 rower=0 dziecko=0)
-[22:00:13] [DZIECKO 18003] Bez opiekuna - odmowa
-[22:00:23] [KIEROWCA 17001] Odjazd: 0 pasazerow, 0 rowerow
-```
-
-**Weryfikacja**:
-- ✅ Wszystkie dzieci <8 lat są odrzucane
-- ✅ Autobus odjeżdża pusty (bo nikt nie może wsiąść)
-- ✅ Brak crashy, system działa stabilnie
-
----
-
-## Test 10: Długotrwałe działanie - test stabilności
-
-**Cel**: Sprawdzenie czy system nie ma wycieków pamięci/zasobów
-
-**Parametry**: `./main 5 20 10 5`
-
-**Scenariusz**:
-- Uruchom system
-- Pozwól działać 30 minut
-- Monitoruj użycie pamięci (ps aux, top)
-- Zakończ przez Ctrl+C
-
-**Weryfikacja**:
-- ✅ Użycie pamięci stabilne (brak wycieków)
-- ✅ Liczba procesów stabilna (brak zombie)
-- ✅ System działa sprawnie przez cały czas
-- ✅ Graceful shutdown działa poprawnie po długim czasie działania
-- ✅ Wszystkie zasoby IPC są poprawnie czyszczone (`ipcs` po zakończeniu)
-
----
-
-
-
-## 🧹 Użyte mechanizmy systemowe
-
-### Procesy
-- `fork()` – tworzenie procesów potomnych (generator → pasażerowie, dorosły → dziecko)
-- `execl()` – zastępowanie obrazu procesu (uruchamianie driver, cashier, itd.)
-- `wait()`, `waitpid()` – oczekiwanie na zakończenie procesów potomnych
-- `_exit()` – zakończenie procesu bez sprzątania stdio (w procesach potomnych)
-- `getpid()` – uzyskanie PID bieżącego procesu
-
-### Sygnały
-- `sigaction()` – rejestracja obsługi sygnałów (zamiast przestarzałego `signal()`)
-- `kill()` – wysyłanie sygnałów do innych procesów
-- `pause()` – wstrzymanie procesu do otrzymania sygnału
-- **SIGUSR1** – sygnał użytkownika 1 (wymuszenie odjazdu)
-- **SIGUSR2** – sygnał użytkownika 2 (blokada dworca)
-- **SIGINT** – sygnał przerwania (Ctrl+C)
-- **SIGCHLD** – sygnał zakończenia procesu potomnego
-
-### IPC (System V)
-- `ftok()` – generowanie kluczy IPC na podstawie ścieżki pliku i identyfikatora projektu
-- **Pamięć dzielona**: 
-  - `shmget()` – tworzenie/dostęp do segmentu pamięci dzielonej
-  - `shmat()` – dołączanie segmentu do przestrzeni adresowej procesu
-  - `shmdt()` – odłączanie segmentu
-  - `shmctl(IPC_RMID)` – usunięcie segmentu
-- **Semafory**: 
-  - `semget()` – tworzenie/dostęp do zestawu semaforów
-  - `semop()` – operacje atomowe na semaforach (P, V)
-  - `semctl(SETVAL)` – ustawienie wartości początkowej
-  - `semctl(IPC_RMID)` – usunięcie zestawu
-- **Kolejki komunikatów**: 
-  - `msgget()` – tworzenie/dostęp do kolejki komunikatów
-  - `msgsnd()` – wysłanie wiadomości
-  - `msgrcv()` – odbiór wiadomości (blokujący lub IPC_NOWAIT)
-  - `msgctl(IPC_RMID)` – usunięcie kolejki
-
-### Pipe (komunikacja rodzic-dziecko)
-- `pipe()` – tworzenie łącza nienazwanego (unidirectional)
-- `read()` – odczyt z pipe
-- `write()` – zapis do pipe
-- `close()` – zamknięcie końca pipe
-
-### Pliki
-- `creat()` – tworzenie pliku
-- `open()` – otwieranie pliku z flagami (O_CREAT, O_WRONLY, O_APPEND)
-- `write()` – zapis do pliku (logowanie)
-- `close()` – zamknięcie deskryptora pliku
-- `unlink()` – usuwanie pliku
-
-### Inne
-- `time()`, `localtime()`, `strftime()` – znaczniki czasowe w logach
-- `srand()`, `rand()` – generowanie losowych wartości (VIP, rower, wiek, dziecko, Ti)
-- `sleep()` – opóźnienia (czekanie T, jazda Ti, opóźnienia generatora)
-
-
----
-## 🔗 Nawigacja po kodzie źródłowym
-
-### 📚 Definicje i struktury danych
-
-| Element | Opis | Link do kodu |
-|---------|------|--------------|
-| **`struct BusState`** | Struktura w pamięci dzielonej - stan autobusu, liczniki pasażerów/rowerów, flagi shutdown | [ipc.h#L37-L60](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/ipc.h#L37-L60) |
-| **`struct msg`** | Struktura wiadomości w kolejce - rejestracja i bilety | [ipc.h#L69-L82](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/ipc.h#L69-L82) |
-| **Typy wiadomości** | `MSG_REGISTER`, `MSG_TICKET_REPLY` - stałe dla komunikacji | [ipc.h#L25-L26](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/ipc.h#L25-L26) |
-| **Ścieżki kluczy IPC** | `SHM_PATH`, `SEM_PATH`, `MSG_PATH` - pliki dla `ftok()` | [ipc.h#L19-L21](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/ipc.h#L19-L21) |
-
----
+## 🗺️ Nawigacja po kodzie źródłowym
 
 ### 🎯 Inicjalizacja systemu (main.c)
 
-| Funkcjonalność | Opis | Link do kodu |
-|----------------|------|--------------|
-| **Parsowanie argumentów** | Odczyt N, P, R, T z `argv[]` | [main.c#L152-L155](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L152-L155) |
-| **Tworzenie kluczy IPC** | `creat()` + `ftok()` dla SHM, SEM, MSG | [main.c#L174-L182](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L174-L182) |
-| **Inicjalizacja pamięci dzielonej** | `shmget()` + `shmat()` + inicjalizacja `BusState` | [main.c#L192-L205](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L192-L205) |
-| **Inicjalizacja semaforów** | `semget()` + `semctl(SETVAL)` dla 4 semaforów | [main.c#L213-L224](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L213-L224) |
-| **Inicjalizacja kolejki** | `msgget()` dla komunikacji kasa-pasażer | [main.c#L228-L233](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L228-L233) |
-| **Tworzenie procesów** | `fork()` + `execl()` dla driver (×N), cashier, dispatcher, generator | [main.c#L277-L323](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L277-L323) |
-| **Główna pętla wait** | `wait()` - zbieranie zombie procesów | [main.c#L328](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L328) |
-| **Cleanup zasobów** | `shmctl()`, `semctl()`, `msgctl()` - usuwanie IPC | [main.c#L84-L98](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/main.c#L84-L98) |
+| Funkcjonalność | Opis |
+|----------------|------|
+| **Parsowanie argumentów** | Odczyt N, P, R, T z `argv[]` |
+| **Tworzenie kluczy IPC** | `creat()` + `ftok()` dla SHM, SEM, MSG |
+| **Inicjalizacja pamięci dzielonej** | `shmget()` + `shmat()` + inicjalizacja `BusState` |
+| **Inicjalizacja semaforów** | `semget()` + `semctl(SETVAL)` dla 6 semaforów |
+| **Inicjalizacja kolejki** | `msgget()` dla komunikacji kasa-pasażer |
+| **Tworzenie procesów** | `fork()` + `execl()` dla driver (×N), cashier, dispatcher, generator |
+| **Główna pętla wait** | `wait()` - zbieranie zombie procesów |
+| **Cleanup zasobów** | `shmctl()`, `semctl()`, `msgctl()` - usuwanie IPC |
 
 ---
 
 ### 🚌 Proces kierowcy (driver.c)
 
-| Funkcjonalność | Opis | Link do kodu |
-|----------------|------|--------------|
-| **Rejestracja handlerów sygnałów** | `sigaction()` dla SIGUSR1, SIGUSR2 | [driver.c#L165-L187](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L165-L187) |
-| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `semget()` | [driver.c#L139-L161](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L139-L161) |
-| **Blokada dworca** | `gate_lock(3)` - tylko 1 autobus na dworcu | [driver.c#L90-L93](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L90-L93) |
-| **Ustawienie PID kierowcy** | `bus->driver_pid = getpid()` w sekcji krytycznej | [driver.c#L209](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L209) |
-| **Czekanie T sekund** | Pętla `sleep(1)` z obsługą `force_flag` | [driver.c#L229-L241](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L229-L241) |
-| **Blokada bramek** | `gate_lock(1)` + `gate_lock(2)` przed odjazdem | [driver.c#L258-L259](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L258-L259) |
-| **Ustawienie flagi odjazdu** | `bus->departing = 1` + odczyt liczników | [driver.c#L263-L266](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L263-L266) |
-| **Reset liczników** | `bus->passengers = 0`, `bus->bikes = 0` | [driver.c#L278-L279](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L278-L279) |
-| **Odblokowanie bramek** | `gate_unlock(1, 2, 3)` - zwolnienie zasobów | [driver.c#L283-L285](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L283-L285) |
-| **Jazda (sleep Ti)** | `sleep(3 + rand() % 7)` - losowy czas trasy [3-9]s | [driver.c#L289-L290](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L289-L290) |
-| **Handler SIGUSR1** | Ustawienie `force_flag = 1` - wymuszenie odjazdu | [driver.c#L110-L113](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L110-L113) |
+| Funkcjonalność | Opis |
+|----------------|------|
+| **Rejestracja handlerów sygnałów** | `sigaction()` dla SIGUSR1, SIGUSR2 |
+| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `semget()` |
+| **Blokada dworca** | `gate_lock(3)` - tylko 1 autobus na dworcu |
+| **Ustawienie PID kierowcy** | `bus->driver_pid = getpid()` w sekcji krytycznej |
+| **Czekanie T sekund** | Pętla `sleep(1)` z obsługą `force_flag` |
+| **Blokada bramek** | `gate_lock(1)` + `gate_lock(2)` przed odjazdem |
+| **Ustawienie flagi odjazdu** | `bus->departing = 1` + odczyt liczników |
+| **Reset liczników** | `bus->passengers = 0`, `bus->bikes = 0` |
+| **Odblokowanie bramek** | `gate_unlock(1, 2, 3)` - zwolnienie zasobów |
+| **Jazda (sleep Ti)** | `sleep(3 + rand() % 7)` - losowy czas trasy [3-9]s |
+| **Powiadomienie pasażerów** | Wysyłanie `MSG_BUS_RETURNED` do wszystkich na liście |
+| **Handler SIGUSR1** | Ustawienie `force_flag = 1` - wymuszenie odjazdu |
 
 ---
 
 ### 💰 Proces kasy (cashier.c)
 
-| Funkcjonalność | Opis | Link do kodu |
-|----------------|------|--------------|
-| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `msgget()` | [cashier.c#L79-L104](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L79-L104) |
-| **Główna pętla** | Sprawdzanie `shutdown` + `msgrcv()` z IPC_NOWAIT | [cashier.c#115-L174](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L115-L174) |
-| **Odbieranie rejestracji** | `msgrcv(MSG_REGISTER, IPC_NOWAIT)` | [cashier.c#L130](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L130) |
-| **Logowanie rejestracji** | Wpis do `report.txt` z PID, VIP, DZIECKO | [cashier.c#L156-L159](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L156-L159) |
-| **Wysyłanie biletu** | `msgsnd(MSG_TICKET_REPLY + PID)` dla nie-VIP dorosłych | [cashier.c#L169-L171](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L169-L171) |
-| **Cleanup** | `shmdt()`| [cashier.c#L181](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/cashier.c#L181) |
+| Funkcjonalność | Opis |
+|----------------|------|
+| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `msgget()` |
+| **Główna pętla** | Sprawdzanie `shutdown` + `msgrcv()` w trybie blokującym |
+| **Odbieranie rejestracji** | `msgrcv(MSG_REGISTER, 0)` - blokujące |
+| **Obsługa wake-up message** | PID=0 budzenie przy shutdown |
+| **Logowanie rejestracji** | Wpis do `report.txt` z PID, VIP, DZIECKO |
+| **Wysyłanie biletu** | `msgsnd(MSG_TICKET_REPLY + PID)` dla nie-VIP dorosłych |
+| **Cleanup** | `shmdt()` |
 
 ---
 
 ### 🎮 Proces dyspozytora (dispatcher.c)
 
-| Funkcjonalność | Opis | Link do kodu |
-|----------------|------|--------------|
-| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `semget()` | [dispatcher.c#L116-L135](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L116-L135) |
-| **Handler SIGUSR1** | Wymuszenie odjazdu - `kill(driver_pid, SIGUSR1)` | [dispatcher.c#L76-L86](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L76-L86) |
-| **Handler SIGUSR2** | Blokada dworca - ustawienie flag shutdown | [dispatcher.c#L97-L112](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L97-L112) |
-| **Handler SIGINT** | Graceful shutdown - ustawienie flag | [dispatcher.c#L63-L66](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L63-L66) |
-| **Rejestracja handlerów** | `sigaction()` dla wszystkich sygnałów | [dispatcher.c#L144-L166](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L144-L166) |
-| **Główna pętla** | `pause()` - czekanie na sygnały | [dispatcher.c#L172](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/dispatcher.c#L172) |
+| Funkcjonalność | Opis |
+|----------------|------|
+| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `semget()` |
+| **Handler SIGUSR1** | Wymuszenie odjazdu - `kill(driver_pid, SIGUSR1)` |
+| **Handler SIGUSR2** | Blokada dworca - ustawienie flag shutdown |
+| **Handler SIGINT** | Graceful shutdown - ustawienie flag |
+| **Rejestracja handlerów** | `sigaction()` dla wszystkich sygnałów |
+| **Główna pętla** | `pause()` - czekanie na sygnały |
 
 ---
 
 ### 👤 Proces pasażera (passenger.c)
 
-| Funkcjonalność | Opis | Link do kodu |
-|----------------|------|--------------|
-| **Losowanie cech** | VIP (1%), rower (50%), wiek (0-79), dziecko (20%) | [passenger.c#L195-L200](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L195-L200) |
-| **Sprawdzenie dworca** | `station_blocked` → "Dworzec zamknięty" | [passenger.c#L213-L216](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L213-L216) |
-| **Odmowa dla samotnego dziecka** | Wiek <8 → "Bez opiekuna - odmowa" | [passenger.c#L231-L240](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L231-L240) |
-| **Wysłanie rejestracji** | `msgsnd(MSG_REGISTER)` do kasy | [passenger.c#L269-L271](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L269-L271) |
-| **Czekanie na bilet** | `msgrcv(MSG_TICKET_REPLY + PID)` dla nie-VIP | [passenger.c#L281](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L281) |
-| **Fork dla dziecka** | `pipe()` + `fork()` dla synchronizacji | [passenger.c#L326-L344](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L326-L344) |
-| **Proces dziecka** | `read()` z pipe - czekanie na sygnał rodzica | [passenger.c#L352](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L352) |
-| **Funkcja try_board()** | Atomowa próba wejścia - sprawdzenie miejsc | [passenger.c#L123-L165](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L123-L165) |
-| **Blokada bramki** | `gate_lock(1 lub 2)` w zależności od roweru | [passenger.c#L125-L128](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L125-L128) |
-| **Sprawdzenie warunków** | `shutdown`, `departing`, wolne miejsca | [passenger.c#L141-L156](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L141-L156) |
-| **Wejście do autobusu** | `bus->passengers += needed`, `bus->bikes++` | [passenger.c#L159-L160](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L159-L160) |
-| **Pętla prób wejścia** | Wywołania `try_board()` ze `sleep(1)` | [passenger.c#L374,L406](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L374-L406) |
-| **Sygnał dla dziecka** | `write()` do pipe po udanym wejściu | [passenger.c#L389](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L389) |
-| **Dekrementacja licznika** | `bus->active_passengers--` przed wyjściem | [passenger.c#L437](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L437) |
+| Funkcjonalność | Opis |
+|----------------|------|
+| **Losowanie cech** | VIP (1%), rower (50%), wiek (0-79), dziecko (20%) |
+| **Sprawdzenie dworca** | `station_blocked` → "Dworzec zamknięty" |
+| **Odmowa dla samotnego dziecka** | Wiek <8 → "Bez opiekuna - odmowa" |
+| **Wysłanie rejestracji** | `msgsnd(MSG_REGISTER)` do kasy |
+| **Czekanie na bilet** | `msgrcv(MSG_TICKET_REPLY + PID)` dla nie-VIP |
+| **Utworzenie wątku dla dziecka** | `pthread_create()` + synchronizacja przez mutex/cond |
+| **Wątek dziecka** | `pthread_cond_wait()` - czekanie na sygnał rodzica |
+| **Funkcja try_board()** | Atomowa próba wejścia - sprawdzenie miejsc |
+| **Blokada bramki** | `gate_lock(1 lub 2)` w zależności od roweru |
+| **Sprawdzenie warunków** | `shutdown`, `departing`, wolne miejsca |
+| **Wejście do autobusu** | `bus->passengers += needed`, `bus->bikes++` |
+| **Dodanie do listy** | `bus->passenger_list[bus->passenger_count++] = pid` |
+| **Pętla prób wejścia** | Wywołania `try_board()` ze `sleep(1)` |
+| **Sygnał dla dziecka** | `pthread_cond_signal()` po udanym wejściu |
+| **Czekanie na powrót** | `msgrcv(MSG_BUS_RETURNED + PID)` |
+| **Dekrementacja licznika** | `bus->active_passengers--` przed wyjściem |
 
 ---
 
 ### 🔄 Generator pasażerów (passenger_generator.c)
 
-| Funkcjonalność | Opis | Link do kodu |
-|----------------|------|--------------|
-| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `semget()` | [passenger_generator.c#L106-L128](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L106-L128) |
-| **Główna pętla** | Nieskończona pętla `for(;;)` | [passenger_generator.c#L154-L199](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L154-L199) |
-| **Losowe opóźnienie** | `sleep(1 + rand() % 3)` - co 1-3 sekundy | [passenger_generator.c#L157-L158](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L157-L158) |
-| **Sprawdzenie shutdown** | `shutdown` lub `station_blocked` → koniec | [passenger_generator.c#L162-L165](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L162-L165) |
-| **Inkrementacja licznika** | `bus->active_passengers++` przed fork | [passenger_generator.c#L175](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L175) |
-| **Fork pasażera** | `fork()` + `execl("./passenger")` | [passenger_generator.c#L179-L195](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L179-L195) |
-
-
+| Funkcjonalność | Opis |
+|----------------|------|
+| **Inicjalizacja IPC** | `ftok()`, `shmget()`, `shmat()`, `semget()` |
+| **Główna pętla** | Nieskończona pętla `for(;;)` |
+| **Losowe opóźnienie** | `sleep(1 + rand() % 3)` - co 1-3 sekundy |
+| **Sprawdzenie shutdown** | `shutdown` lub `station_blocked` → koniec |
+| **Sprawdzenie limitu** | `generator_count < MAX_PASSENGERS` |
+| **Inkrementacja licznika** | `bus->active_passengers++` przed fork |
+| **Fork pasażera** | `fork()` + `execl("./passenger")` |
 
 ---
 
 ### 🔍 Kluczowe sekcje krytyczne
 
-| Sekcja krytyczna | Chroniony zasób | Gdzie | Link |
-|------------------|-----------------|-------|------|
-| **Próba wejścia pasażera** | `bus->passengers`, `bus->bikes` | passenger.c | [L159-L160](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L159-L160) |
-| **Odjazd autobusu** | `bus->departing`, liczniki | driver.c | [L263](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L263) |
-| **Przyjazd na dworzec** | `bus->driver_pid`, `bus->departing` | driver.c | [L210](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/driver.c#L210) |
-| **Tworzenie pasażera** | `bus->active_passengers` | passenger_generator.c | [L174-L176](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger_generator.c#L174-L176) |
-| **Koniec pasażera** | `bus->active_passengers` | passenger.c | [L450](https://github.com/Gabkaja/Projekt_Autobus_podmiejski/blob/main/passenger.c#L450) |
-
+| Sekcja krytyczna | Chroniony zasób | Gdzie |
+|------------------|-----------------|-------|
+| **Próba wejścia pasażera** | `bus->passengers`, `bus->bikes`, `bus->passenger_list` | passenger.c:try_board() |
+| **Odjazd autobusu** | `bus->departing`, liczniki | driver.c |
+| **Przyjazd na dworzec** | `bus->driver_pid`, `bus->departing` | driver.c |
+| **Tworzenie pasażera** | `bus->active_passengers` | passenger_generator.c |
+| **Koniec pasażera** | `bus->active_passengers` | passenger.c |
+| **Logowanie** | Pliki logów | Chronione pthread_mutex w passenger.c |
 
 ---
 
