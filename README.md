@@ -596,7 +596,7 @@ Powrót do początku pętli
 - 10 sekund czasu oczekiwania
 
 **Scenariusz**: 
-- Generator tworzy 20 pasażerów w krótkim czasie (1-3s)
+- Generator tworzy pasażerów w krótkim czasie (1-3s)
 - Wszyscy próbują wsiąść do jednego małego autobusu
 - Część będzie musiała czekać na następny kurs
 
@@ -687,17 +687,21 @@ Powrót do początku pętli
 
 **Przykładowe logi**:
 ```
-[16:20:10] [KIEROWCA 5001] Autobus na dworcu
-[16:20:11] [PASAZER 6001] Przybycie (VIP=0 wiek=35 rower=0 dziecko=1)
-[16:20:12] [DOROSLY+DZIECKO 6001] Wsiadl (VIP=0 rower=0)
-[16:20:13] [PASAZER 6002] Przybycie (VIP=0 wiek=28 rower=1 dziecko=1)
-[16:20:14] [DOROSLY+DZIECKO 6002] Wsiadl (VIP=0 rower=1)
-[16:20:15] [PASAZER 6003] Przybycie (VIP=0 wiek=42 rower=0 dziecko=1)
-[16:20:16] [DOROSLY+DZIECKO 6003] Wsiadl (VIP=0 rower=0)
-[16:20:17] [PASAZER 6004] Przybycie (VIP=0 wiek=31 rower=0 dziecko=1)
-[16:20:25] [KIEROWCA 5001] Odjazd: 6 pasazerow, 1 rowerow
-[16:20:26] [KIEROWCA 5002] Autobus na dworcu
-[16:20:27] [DOROSLY+DZIECKO 6004] Wsiadl (VIP=0 rower=0)
+[12:59:37] [DOROSLY+DZIECKO 2744158] Wsiadl (VIP=0 rower=1)
+[12:59:37] [DOROSLY+DZIECKO 2744046] Wsiadl (VIP=0 rower=0)
+[12:59:37] [DOROSLY+DZIECKO 2744058] Wsiadl (VIP=0 rower=0)
+[12:59:37] [PASAZER 2744180] Przybycie (VIP=0 wiek=56 rower=1 dziecko=1)
+[12:59:37] [PASAZER 2744181] Przybycie (VIP=0 wiek=28 rower=1 dziecko=1)
+[12:59:37] [PASAZER 2744182] Przybycie (VIP=0 wiek=54 rower=0 dziecko=1)
+[12:59:38] [KASA] Rejestracja PID=2744180 VIP=0 DZIECKO=0
+[12:59:38] [KASA] Rejestracja PID=2744182 VIP=0 DZIECKO=0
+[12:59:38] [KASA] Rejestracja PID=2744181 VIP=0 DZIECKO=0
+[12:59:38] [PASAZER 2744184] Przybycie (VIP=0 wiek=77 rower=1 dziecko=1)
+[12:59:39] [KASA] Rejestracja PID=2744184 VIP=0 DZIECKO=0
+[12:59:39] [PASAZER 2744188] Przybycie (VIP=0 wiek=60 rower=0 dziecko=1)
+[12:59:40] [KASA] Rejestracja PID=2744188 VIP=0 DZIECKO=0
+[12:59:41] [KIEROWCA 2743949] Powrot po 7s
+[12:59:42] [KIEROWCA 2743950] Odjazd: 6 pasazerow, 1 rowerow
 ```
 
 **Weryfikacja**:
@@ -782,79 +786,91 @@ Powrót do początku pętli
 
 ## Test 6: Minimalna pojemność - bardzo mały autobus
 
-**Cel**: Test skrajnego przypadku P=1, R=0
+**Cel**: Test skrajnego przypadku P=1, R=1
 
-**Parametry**: `./main 1 1 0 5`
+**Parametry**: `./main 1 1 1 2`
 - 1 autobus
 - 1 miejsce (!)
-- 0 rowerów (!)
-- 5 sekund czasu
+- 1 rower (!)
+- 2 sekundy czasu
 
 **Scenariusz**:
-- Generator tworzy 10 pasażerów
+- Generator tworzy
 - Wszyscy muszą jechać po kolei
-- Pasażerowie z rowerami nie mogą w ogóle wsiąść
 
 **Przykładowe logi**:
 ```
-[19:00:10] [KIEROWCA 11001] Autobus na dworcu
-[19:00:11] [PASAZER 12001] Przybycie (VIP=0 wiek=25 rower=0 dziecko=0)
-[19:00:11] [PASAZER 12001] Wsiadl (VIP=0 rower=0)
-[19:00:12] [PASAZER 12002] Przybycie (VIP=0 wiek=30 rower=1 dziecko=0)
-[19:00:13] [PASAZER 12003] Przybycie (VIP=0 wiek=35 rower=0 dziecko=0)
-[19:00:16] [KIEROWCA 11001] Odjazd: 1 pasazerow, 0 rowerow
-[19:00:20] [KIEROWCA 11001] Powrot po 4s
-[19:00:20] [KIEROWCA 11001] Autobus na dworcu
-[19:00:21] [PASAZER 12003] Wsiadl (VIP=0 rower=0)
-[19:00:26] [KIEROWCA 11001] Odjazd: 1 pasazerow, 0 rowerow
+[10:41:20] [KASA] Rejestracja PID=2719399 VIP=0 DZIECKO=0
+[10:41:21] [KIEROWCA 2719392] Powrot po 3s
+[10:41:21] [KIEROWCA 2719392] Autobus na dworcu
+[10:41:21] [PASAZER 2719397] Wsiadl (VIP=0 rower=0)
+[10:41:21] [PASAZER 2719400] Przybycie (VIP=0 wiek=23 rower=0 dziecko=1)
+[10:41:22] [KASA] Rejestracja PID=2719400 VIP=0 DZIECKO=0
+[10:41:23] [KIEROWCA 2719392] Odjazd: 1 pasazerow, 0 rowerow
+[10:41:23] [PASAZER 2719402] Przybycie (VIP=0 wiek=23 rower=0 dziecko=1)
+[10:41:24] [KASA] Rejestracja PID=2719402 VIP=0 DZIECKO=0
+[10:41:24] [PASAZER 2719405] Przybycie (VIP=0 wiek=23 rower=0 dziecko=1)
+[10:41:25] [KASA] Rejestracja PID=2719405 VIP=0 DZIECKO=0
+[10:41:26] [PASAZER 2719409] Przybycie (VIP=0 wiek=58 rower=0 dziecko=0)
+[10:41:27] [KASA] Rejestracja PID=2719409 VIP=0 DZIECKO=0
+[10:41:29] [PASAZER 2719410] Przybycie (VIP=0 wiek=24 rower=0 dziecko=0)
+[10:41:30] [KASA] Rejestracja PID=2719410 VIP=0 DZIECKO=0
+[10:41:31] [PASAZER 2719467] Przybycie (VIP=0 wiek=73 rower=0 dziecko=0)
+[10:41:31] [KASA] Rejestracja PID=2719467 VIP=0 DZIECKO=0
+[10:41:32] [KIEROWCA 2719392] Powrot po 9s
+[10:41:32] [KIEROWCA 2719392] Autobus na dworcu
+[10:41:32] [PASAZER 2719472] Przybycie (VIP=0 wiek=44 rower=0 dziecko=0)
+[10:41:32] [PASAZER 2719399] Wsiadl (VIP=0 rower=0)
 ```
 
 **Weryfikacja**:
-- ✅ Każdy odjazd: DOKŁADNIE 1 pasażer, 0 rowerów
-- ✅ Pasażer 12002 (z rowerem) NIGDY nie wsiada (czeka w nieskończoność)
-- ✅ Pasażerowie bez rowerów wsiadają po kolei
+- ✅ Każdy odjazd: DOKŁADNIE 1 pasażer, 0 lub 1 rowerów
+- ✅ Pasażerowie wsiadają po kolei
 - ✅ System nie deadlockuje mimo ekstremalnych ograniczeń
 
 ---
 
-## Test 7: Maksymalna konkurencja - 10 autobusów, duży ruch
+## Test 7: Stress test
 
-**Cel**: Stress test z wieloma autobusami i pasażerami
+**Cel**: Stress test - symulacja bez sleepów
 
-**Parametry**: `./main 10 15 8 3`
-- 10 autobusów
-- 15 miejsc
-- 8 rowerów
-- 3 sekundy czasu (bardzo szybki obrót)
+**Parametry**: `./main 3 10 5 4`
+- 3 autobusów
+- 10 miejsc
+- 5 rowerów
+- 4 sekundy czasu (nie dotyczy gdyz sleep jest zakomentowany)
+- zmiana kodu na potrzeby testu - dodano sprawdzanie limitu procesow
 
 **Scenariusz**:
-- Generator tworzy pasażerów co 1-3s
-- Wiele autobusów jednocześnie na dworcu
-- Szybka rotacja - autobusy wracają bardzo szybko
+- Generator tworzy pasażerów natychmiast z odgórnym limitem(w celu uniknięcia wyczerpania limitu procesów na urzadzeniu)
+- Autobusy odjeżdzają natychmiast i wracaja od razu
 
 **Przykładowe logi (fragment)**:
 ```
-[20:10:00] [KIEROWCA 13001] Autobus na dworcu
-[20:10:01] [PASAZER 14001] Wsiadl (VIP=0 rower=1)
-[20:10:02] [PASAZER 14002] Wsiadl (VIP=0 rower=0)
-[20:10:03] [KIEROWCA 13001] Odjazd: 2 pasazerow, 1 rowerow
-[20:10:03] [KIEROWCA 13002] Autobus na dworcu
-[20:10:04] [PASAZER 14003] Wsiadl (VIP=0 rower=1)
-[20:10:05] [PASAZER 14004] Wsiadl (VIP=0 rower=0)
-[20:10:06] [KIEROWCA 13002] Odjazd: 2 pasazerow, 1 rowerow
-[20:10:06] [KIEROWCA 13003] Autobus na dworcu
-[20:10:07] [KIEROWCA 13001] Powrot po 4s
-[20:10:07] [PASAZER 14005] Wsiadl (VIP=0 rower=0)
-[20:10:09] [KIEROWCA 13003] Odjazd: 1 pasazerow, 0 rowerow
-[20:10:09] [KIEROWCA 13004] Autobus na dworcu
-[20:10:10] [KIEROWCA 13002] Powrot po 4s
+[10:46:38] [KASA] Rejestracja PID=2719891 VIP=0 DZIECKO=0
+[10:46:38] [KASA] Rejestracja PID=2719890 VIP=0 DZIECKO=0
+[10:46:38] [PASAZER 2719891] Wsiadl (VIP=0 rower=1)
+[10:46:38] [KIEROWCA 2719886] Odjazd: 1 pasazerow, 1 rowerow
+[10:46:38] [KIEROWCA 2719886] Powrot po 8s
+[10:46:38] [KIEROWCA 2719885] Autobus na dworcu
+[10:46:38] [GENERATOR] Fork PID=2719894 (zywych=5/100)
+[10:46:38] [KIEROWCA 2719885] Odjazd: 1 pasazerow, 0 rowerow
+[10:46:38] [KIEROWCA 2719885] Powrot po 4s
+[10:46:38] [PASAZER 2719890] Wsiadl (VIP=0 rower=0)
+[10:46:38] [PASAZER 2719893] Przybycie (VIP=0 wiek=32 rower=1 dziecko=0)
+[10:46:38] [KIEROWCA 2719884] Autobus na dworcu
+[10:46:38] [PASAZER 2719894] Przybycie (VIP=0 wiek=65 rower=0 dziecko=0)
+[10:46:38] [KASA] Rejestracja PID=2719894 VIP=0 DZIECKO=0
+[10:46:38] [KIEROWCA 2719884] Odjazd: 0 pasazerow, 0 rowerow
+[10:46:38] [KASA] Rejestracja PID=2719893 VIP=0 DZIECKO=0
+[10:46:38] [KIEROWCA 2719884] Powrot po 6s
 ```
 
 **Weryfikacja**:
 - ✅ W KAŻDEJ chwili MAX 1 autobus na dworcu (semafor gate[3])
 - ✅ Brak nakładających się "Autobus na dworcu" bez "Odjazd"
-- ✅ Wszystkie powroty są logiczne (czas 3-9s)
-- ✅ Brak deadlocków mimo 10 autobusów
+- ✅ Brak deadlocków
+- ✅ Limit nie jest przekraczany 
 
 ---
 
@@ -881,7 +897,7 @@ Powrót do początku pętli
 ```
 
 **Weryfikacja**:
-- ✅ BRAK logów "KASA Rejestracja" dla VIPów przed wejściem do autobusu
+- ✅ BRAK logów "KASA Rejestracja" dla VIPów PRZED wejściem do autobusu
 - ✅ VIPowie wsiadają NATYCHMIAST bez czekania na bilet
 
 ---
