@@ -30,7 +30,7 @@ driver: driver.c $(DEPS)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 passenger: passenger.c $(DEPS)
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -lpthread
 
 cashier: cashier.c $(DEPS)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)

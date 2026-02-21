@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
 #include <sys/shm.h>
@@ -78,8 +79,16 @@ int main() {
         return 1;
     }
 
-    sleep(20);//sleep do testow
-
+    /* Kasjer ignoruje sygnały zewnętrzne – kończy pracę wyłącznie przez
+     * wake-up message (pid=0) wysłany przez main podczas shutdown.
+     * Bez tego: Ctrl+C trafia do całej grupy procesów jednocześnie,
+     * kasjer ginie natychmiast i zostaje zombie zanim main zdąży wait(). */
+    signal(SIGINT,  SIG_IGN);
+    signal(SIGUSR1, SIG_IGN);
+    signal(SIGUSR2, SIG_IGN);
+    signal(SIGHUP,  SIG_IGN);
+   
+    sleep(10);
     char b[64];
     ts(b, sizeof(b));
     char ln[128];
@@ -89,18 +98,14 @@ int main() {
 
     for (;;) {
         struct msg m;
-        
-        // ZAWSZE używamy blokującego msgrcv (BEZ IPC_NOWAIT)
-        // Main wyśle nam wake-up message gdy będzie shutdown
+
+        /* Blokujące oczekiwanie na żądanie rejestracji.
+         * Main wyśle wake-up (pid=0) gdy nadejdzie shutdown. */
         ssize_t r = msgrcv(msgid, &m, sizeof(m) - sizeof(long), MSG_REGISTER, 0);
 
         if (r < 0) {
-            if (errno == EINTR) {
-                // Przerwane przez sygnał - kontynuuj
-                continue;
-            }
-            if (errno == EIDRM) {
-                // Kolejka została usunięta - kończymy
+            if (errno == EINTR)  continue;
+            if (errno == EIDRM || errno == EINVAL) {
                 ts(b, sizeof(b));
                 snprintf(ln, sizeof(ln), "[%s] [KASA] Kolejka usunieta - koniec\n", b);
                 log_write(ln);
@@ -110,82 +115,101 @@ int main() {
             perror("msgrcv");
             break;
         }
-        
-        // WAŻNE: Wake-up message (PID=0) sprawdzamy PRZED logowaniem
+
+        /* --- Wake-up message (pid=0) oznacza shutdown --- */
         if (m.pid == 0) {
-            // To był wake-up message do przebudzenia
             sem_lock();
             int sd = bus->shutdown;
             sem_unlock();
-            
-            if (sd) {
-                // Shutdown - kończymy pracę
-                ts(b, sizeof(b));
-                snprintf(ln, sizeof(ln), "[%s] [KASA] Otrzymano shutdown - koniec pracy\n", b);
-                log_write(ln);
-                log_main(ln);
-                break;
+
+            if (!sd) continue;   /* fałszywy alarm – czekaj dalej */
+
+            /* Shutdown potwierdzony.
+             * KLUCZOWE: zanim wyjdziemy, opróżniamy całą kolejkę żądań
+             * przez IPC_NOWAIT. Dzięki temu każdy pasażer który zdążył
+             * wysłać MSG_REGISTER PRZED shutdownem dostanie swój bilet
+             * i wyjdzie normalnie zamiast wisieć na msgrcv(msgid_reply).
+             * Bez tego drenażu mielibyśmy: total_sent_to_cashier >> cashier_processed. */
+            ts(b, sizeof(b));
+            snprintf(ln, sizeof(ln),
+                     "[%s] [KASA] Shutdown – drenaż kolejki zadan...\n", b);
+            log_write(ln);
+            log_main(ln);
+
+            for (;;) {
+                struct msg dm;
+                ssize_t dr = msgrcv(msgid, &dm, sizeof(dm) - sizeof(long),
+                                    MSG_REGISTER, IPC_NOWAIT);
+                if (dr < 0) {
+                    if (errno == ENOMSG) break;      /* kolejka pusta – koniec */
+                    if (errno == EIDRM || errno == EINVAL) goto cashier_done;
+                    break;
+                }
+                if (dm.pid == 0) continue;           /* kolejny wake-up – ignoruj */
+
+                if (!dm.vip) {
+                    sem_lock();
+                    bus->cashier_processed++;
+                    sem_unlock();
+
+                    dm.ticket_ok = 1;
+                    dm.type = MSG_TICKET_REPLY + dm.pid;
+                    if (msgsnd(msgid_reply, &dm, sizeof(dm) - sizeof(long),
+                               IPC_NOWAIT) == -1) {
+                        if (errno == EIDRM || errno == EINVAL) goto cashier_done;
+                        /* EAGAIN = kolejka odpowiedzi pełna – pasażer i tak
+                         * zaraz wyjdzie przez EIDRM przy cleanup(), nie tracimy go */
+                    }
+                }
             }
-            // Nie było shutdown - czekamy dalej
-            continue;
+
+            ts(b, sizeof(b));
+            snprintf(ln, sizeof(ln),
+                     "[%s] [KASA] Drenaż zakończony – koniec pracy\n", b);
+            log_write(ln);
+            log_main(ln);
+            break;
         }
 
-        // Sprawdzamy shutdown PO otrzymaniu prawdziwego pasażera
-        // (żeby nie stracić jego wiadomości)
-        sem_lock();
-        int sd = bus->shutdown;
-        sem_unlock();
-
+        /* --- Normalny pasażer --- */
         ts(b, sizeof(b));
         snprintf(ln, sizeof(ln), "[%s] [KASA] Rejestracja PID=%d VIP=%d DZIECKO=%d\n",
                  b, m.pid, m.vip, m.child);
         log_write(ln);
 
-        // Wysyłamy bilet dla WSZYSTKICH nie-VIP pasażerów
         if (!m.vip) {
-            // ========== INKREMENTACJA LICZNIKA: KASA OBSŁUŻYŁA ==========
             sem_lock();
             bus->cashier_processed++;
             sem_unlock();
-            
+
             m.ticket_ok = 1;
             m.type = MSG_TICKET_REPLY + m.pid;
-            
-            ts(b, sizeof(b));
-            snprintf(ln, sizeof(ln), "[%s] [KASA] Wysylam bilet dla PID=%d type=%ld\n", 
-                     b, m.pid, m.type);
-            log_write(ln);
-            
+
             if (msgsnd(msgid_reply, &m, sizeof(m) - sizeof(long), 0) == -1) {
-                if (errno == EIDRM) {
+                if (errno == EIDRM || errno == EINVAL) {
                     ts(b, sizeof(b));
-                    snprintf(ln, sizeof(ln), "[%s] [KASA] Kolejka usunieta podczas wysylania - koniec\n", b);
+                    snprintf(ln, sizeof(ln),
+                             "[%s] [KASA] IPC usuniete podczas wysylania biletu – koniec\n", b);
                     log_write(ln);
                     log_main(ln);
-                    break;
-                } else {
-                    ts(b, sizeof(b));
-                    snprintf(ln, sizeof(ln), "[%s] [KASA] BLAD msgsnd biletu dla PID=%d (errno=%d: %s)\n", 
-                             b, m.pid, errno, strerror(errno));
-                    log_write(ln);
-                    log_main(ln);
+                    goto cashier_done;
                 }
+                ts(b, sizeof(b));
+                snprintf(ln, sizeof(ln),
+                         "[%s] [KASA] BLAD msgsnd biletu dla PID=%d (errno=%d: %s)\n",
+                         b, m.pid, errno, strerror(errno));
+                log_write(ln);
+                log_main(ln);
             } else {
                 ts(b, sizeof(b));
-                snprintf(ln, sizeof(ln), "[%s] [KASA] Wyslano bilet dla PID=%d\n", b, m.pid);
+                snprintf(ln, sizeof(ln), "[%s] [KASA] Wyslano bilet dla PID=%d\n",
+                         b, m.pid);
                 log_write(ln);
             }
         }
-        
-        // Jeśli był shutdown, kończymy PO obsłużeniu tego pasażera
-        if (sd) {
-            ts(b, sizeof(b));
-            snprintf(ln, sizeof(ln), "[%s] [KASA] Shutdown - koncze po obsluzeniu PID=%d\n", b, m.pid);
-            log_write(ln);
-            log_main(ln);
-            break;
-        }
     }
+
+cashier_done:
 
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln), "[%s] [KASA] Koniec pracy\n", b);

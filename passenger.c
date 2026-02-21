@@ -1,17 +1,23 @@
 /*
- * passenger.c - Proces pasażera
+ * passenger.c – Proces pasażera
  *
  * Typy pasażerów (losowe):
- *   VIP         (~20%) - omija kasę, wsiada bez biletu
- *   Opiekun     (~15%) - idzie do kasy, wsiada za 2 miejsca (on + dziecko)
- *   Z rowerem   (~20%) - idzie do kasy, potrzebuje miejsca na rower
- *   Zwykły      (~35%) - idzie do kasy
- *   Dziecko bez opiekuna (~10%) - odrzucany natychmiast
+ *   VIP              (~20%) – omija kasę
+ *   Dziecko samotne  (~10%) – odrzucane natychmiast (brak opiekuna)
+ *   Z rowerem        (~20%) – idzie do kasy, potrzebuje miejsca na rower
+ *   Opiekun+dziecko  (~15%) – idzie do kasy, rezerwuje 2 miejsca;
+ *                             dziecko = pthread wewnątrz tego procesu
+ *   Zwykły           (~35%) – idzie do kasy
  *
- * Synchronizacja:
- *   sem[0] - mutex dla pamięci dzielonej
- *   sem[6] - sygnał powrotu autobusu (driver postuje N razy dla N pasażerów)
- *            + passenger_trip_completed[pid] jako flaga kto konkretnie może wyjść
+ * Synchronizacja IPC:
+ *   sem[0]  – mutex ogólny dla shared memory
+ *   sem[6]  – sygnał powrotu autobusu (driver postuje 1 raz per dorosły pasażer)
+ *
+ * Synchronizacja wewnątrz procesu (opiekun ↔ wątek dziecka):
+ *   ChildCtx.mtx  – pthread_mutex
+ *   ChildCtx.cond – pthread_cond
+ *   ChildCtx.boarded   – opiekun wsiadł → budzi dziecko
+ *   ChildCtx.trip_done – autobus wrócił → budzi dziecko po raz drugi
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -19,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/sem.h>
@@ -30,18 +37,32 @@
 #include <signal.h>
 #include "ipc.h"
 
-static int shmid, semid, msgid, msgid_reply;
+/* =========================================================
+ * Globalne zasoby IPC (dostępne też w wątku dziecka)
+ * ========================================================= */
+static int            shmid, semid, msgid, msgid_reply;
 static struct BusState *bus;
 
+/* =========================================================
+ * Kontekst współdzielony między wątkiem opiekuna a wątkiem dziecka
+ * ========================================================= */
+typedef struct {
+    pthread_mutex_t mtx;
+    pthread_cond_t  cond;
+    int      boarded;       /* flaga: opiekun (i dziecko) wsiedli */
+    int      trip_done;     /* flaga: autobus wrócił z trasy      */
+    pid_t    guardian_pid;
+} ChildCtx;
+
+/* =========================================================
+ * Narzędzia: timestamp + logowanie
+ * ========================================================= */
 static void ts(char *buf, size_t n)
 {
     time_t t = time(NULL);
-    struct tm *tm_info = localtime(&t);
-    if (tm_info == NULL) {
-        snprintf(buf, n, "00:00:00");
-        return;
-    }
-    strftime(buf, n, "%H:%M:%S", tm_info);
+    struct tm *ti = localtime(&t);
+    if (!ti) { snprintf(buf, n, "00:00:00"); return; }
+    strftime(buf, n, "%H:%M:%S", ti);
 }
 
 static void log_write(const char *s)
@@ -60,6 +81,9 @@ static void log_main(const char *s)
     close(fd);
 }
 
+/* =========================================================
+ * Semafory IPC
+ * ========================================================= */
 static void sem_lock(void)
 {
     struct sembuf sb = {0, -1, SEM_UNDO};
@@ -73,41 +97,68 @@ static void sem_unlock(void)
     semop(semid, &sb, 1);
 }
 
-/*
- * Czeka na zakończenie trasy autobusu.
+/* =========================================================
+ * Wątek dziecka
+ *
+ * Życie wątku:
+ *  1. Czeka aż opiekun wsiądzie (ctx->boarded)
+ *  2. Loguje "wsiadłem razem z opiekunem"
+ *  3. Czeka aż autobus wróci (ctx->trip_done)
+ *  4. Loguje "wróciłem" i kończy
+ * ========================================================= */
+static void *child_thread(void *arg)
+{
+    ChildCtx *ctx = (ChildCtx *)arg;
+    char b[64], ln[256];
+
+    /* --- czekamy aż opiekun wsiądzie --- */
+    pthread_mutex_lock(&ctx->mtx);
+    while (!ctx->boarded)
+        pthread_cond_wait(&ctx->cond, &ctx->mtx);
+    pthread_mutex_unlock(&ctx->mtx);
+
+    ts(b, sizeof(b));
+    snprintf(ln, sizeof(ln),
+             "[%s] [DZIECKO opiekuna %d] Wsiadlem do autobusu razem z opiekunem\n",
+             b, (int)ctx->guardian_pid);
+    log_write(ln);
+    log_main(ln);
+
+    /* --- czekamy na powrót autobusu --- */
+    pthread_mutex_lock(&ctx->mtx);
+    while (!ctx->trip_done)
+        pthread_cond_wait(&ctx->cond, &ctx->mtx);
+    pthread_mutex_unlock(&ctx->mtx);
+
+    ts(b, sizeof(b));
+    snprintf(ln, sizeof(ln),
+             "[%s] [DZIECKO opiekuna %d] Wrocil z trasy - koniec\n",
+             b, (int)ctx->guardian_pid);
+    log_write(ln);
+    log_main(ln);
+
+    return NULL;
+}
+
+/* =========================================================
+ * Czekanie na powrót autobusu (dla głównego wątku / opiekuna)
  *
  * Driver po powrocie z trasy:
- *   1. (pod mutexem) Ustawia passenger_trip_completed[pid] = 1 dla każdego pasażera
- *   2. (po mutexie)  Robi semop(sem[6], +1) dla każdego dorosłego pasażera
+ *   1. (pod mutexem) Ustawia passenger_trip_completed[pid] = 1
+ *   2. Robi semop(sem[6], +1) dla każdego dorosłego pasażera
  *
- * Pasażer ZAWSZE najpierw konsumuje token (semop -1), a potem sprawdza flagę.
- * Jeśli token nie jest jego (spurious wakeup – inny pasażer wziął nie swój),
- * oddaje go z powrotem i czeka dalej.
- *
- * Ważne: NIE sprawdzamy flagi przed semop, bo wtedy pasażer mógłby wyjść bez
- * konsumowania tokenu → nagromadzenie "duchowych" tokenów i niepotrzebne
- * spurious wakeups w kolejnych kursach.
- *
- * W przypadku shutdown main.c postuje MAX_PASSENGERS sygnałów na sem[6]
- * żeby obudzić każdego zablokowanego pasażera.
- */
+ * Pasażer zawsze najpierw konsumuje token (semop -1),
+ * dopiero potem sprawdza flagę – zapobiega kumulacji tokenów.
+ * ========================================================= */
 static void wait_for_trip_end(pid_t my_pid)
 {
-    char b[64];
-    char ln[256];
+    char b[64], ln[256];
 
     for (;;) {
-        /* Zablokuj na semaforze trip_completed – ZAWSZE najpierw semop,
-         * żeby nie zgubić tokenu i nie dopuścić do kumulacji. */
         struct sembuf sb_wait = {6, -1, 0};
         if (semop(semid, &sb_wait, 1) == -1) {
-            if (errno == EINTR) {
-                /* Przerwane sygnałem – wróć do czekania */
-                continue;
-            }
-            /* EIDRM / EINVAL – IPC usunięte, system się wyłącza.
-             * Jeśli byliśmy w autobusie, driver już nie może nas powiadomić.
-             * Wychodzimy bezpiecznie. */
+            if (errno == EINTR) continue;
+            /* EIDRM / EINVAL – IPC usunięte, wychodzimy */
             ts(b, sizeof(b));
             snprintf(ln, sizeof(ln),
                      "[%s] [PASAZER %d] IPC usuniete podczas czekania - koniec\n",
@@ -116,40 +167,42 @@ static void wait_for_trip_end(pid_t my_pid)
             return;
         }
 
-        /* Sprawdź czy to nasz token */
+        /* Sprawdź czy token jest nasz */
         if (my_pid > 0 && my_pid < MAX_PID
             && bus->passenger_trip_completed[my_pid]) {
             bus->passenger_trip_completed[my_pid] = 0;
-            return; /* Token skonsumowany, flaga wyczyszczona – koniec */
+            return;
         }
 
-        /* Nie nasz token (spurious wakeup) – odłóż go z powrotem. */
+        /* Nie nasz – oddaj i czekaj dalej */
         struct sembuf sb_ret = {6, 1, 0};
         semop(semid, &sb_ret, 1);
-
-        /* Krótka pauza żeby uniknąć busy-waitu gdy wiele pasażerów
-         * jednocześnie oddaje nie swój token. */
         sleep(1);
     }
 }
 
+/* =========================================================
+ * MAIN
+ * ========================================================= */
 int main(void)
 {
-    /* Połącz z zasobami IPC */
-    key_t shm_key     = ftok(SHM_PATH, 'S');
-    key_t sem_key     = ftok(SEM_PATH, 'E');
-    key_t msg_key     = ftok(MSG_PATH, 'M');
-    key_t msg_rpl_key = ftok(MSG_REPLY_PATH, 'R');
+    char b[64], ln[512];
+
+    /* --- Połącz z IPC --- */
+    key_t shm_key     = ftok(SHM_PATH,       'S');
+    key_t sem_key     = ftok(SEM_PATH,        'E');
+    key_t msg_key     = ftok(MSG_PATH,        'M');
+    key_t msg_rpl_key = ftok(MSG_REPLY_PATH,  'R');
 
     if (shm_key == -1 || sem_key == -1 || msg_key == -1 || msg_rpl_key == -1) {
         perror("ftok passenger");
         return 1;
     }
 
-    shmid      = shmget(shm_key, sizeof(struct BusState), 0600);
-    semid      = semget(sem_key, 0, 0600);    /* nsems=0: dostęp do istniejącego zestawu */
-    msgid      = msgget(msg_key, 0600);       /* kolejka żądań (wysyłanie rejestracji) */
-    msgid_reply= msgget(msg_rpl_key, 0600);   /* kolejka odpowiedzi (odbiór biletu) */
+    shmid       = shmget(shm_key,  sizeof(struct BusState), 0600);
+    semid       = semget(sem_key,  0, 0600);   /* nsems=0: istniejący zestaw */
+    msgid       = msgget(msg_key,  0600);
+    msgid_reply = msgget(msg_rpl_key, 0600);
 
     if (shmid == -1 || semid == -1 || msgid == -1 || msgid_reply == -1) {
         perror("get ipc passenger");
@@ -157,29 +210,20 @@ int main(void)
     }
 
     bus = shmat(shmid, NULL, 0);
-    if (bus == (void *)-1) {
-        perror("shmat passenger");
-        return 1;
-    }
+    if (bus == (void *)-1) { perror("shmat passenger"); return 1; }
 
     pid_t my_pid = getpid();
     srand((unsigned)(my_pid ^ (unsigned)time(NULL)));
-
-    char b[64];
-    char ln[512];
     ts(b, sizeof(b));
 
-    /* ===== KROK 1: Sprawdź czy dworzec jest otwarty ===== */
+    /* ===== 1. Sprawdź czy dworzec jest otwarty ===== */
     sem_lock();
-    int sd = bus->shutdown;
+    int sd       = bus->shutdown;
     int sblocked = bus->station_blocked;
     sem_unlock();
 
     if (sd || sblocked) {
-        sem_lock();
-        bus->total_station_blocked++;
-        sem_unlock();
-
+        sem_lock(); bus->total_station_blocked++; sem_unlock();
         snprintf(ln, sizeof(ln),
                  "[%s] [PASAZER %d] Dworzec zamkniety - odchodzi\n", b, (int)my_pid);
         log_write(ln);
@@ -187,66 +231,92 @@ int main(void)
         return 0;
     }
 
-    /* ===== KROK 2: Losuj typ pasażera ===== */
-    int r = rand() % 100;
-    int is_vip        = (r < 20);                           /* 20% */
-    int is_lone_child = (!is_vip && r < 30);                /* 10% */
+    /* ===== 2. Losuj typ pasażera ===== */
+    int r             = rand() % 100;
+    int is_vip        = (r < 20);
+    int is_lone_child = (!is_vip && r < 30);               /* 10% */
     int has_bike      = (!is_vip && !is_lone_child && r < 50); /* 20% */
     int is_guardian   = (!is_vip && !is_lone_child && !has_bike && r < 65); /* 15% */
-    /* pozostałe ~35% to zwykły pasażer */
+    /* pozostałe ~35% = zwykły */
 
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln),
-             "[%s] [PASAZER %d] Start: VIP=%d DZIECKO_SAM=%d ROWER=%d OPIEKUN=%d\n",
+             "[%s] [PASAZER %d] Start: VIP=%d SAM_DZIECKO=%d ROWER=%d OPIEKUN=%d\n",
              b, (int)my_pid, is_vip, is_lone_child, has_bike, is_guardian);
     log_write(ln);
 
-    /* ===== KROK 3: Aktualizacja liczników typów ===== */
+    /* ===== 3. Liczniki typów ===== */
     sem_lock();
     if (is_vip) {
         bus->total_vip++;
     } else {
         bus->total_non_vip++;
-        if (has_bike)    bus->total_bikes++;
+        if (has_bike) bus->total_bikes++;
     }
     sem_unlock();
 
-    /* ===== KROK 4: Dziecko bez opiekuna - odrzucamy ===== */
+    /* ===== 4. Dziecko bez opiekuna – odrzucamy od razu ===== */
     if (is_lone_child) {
-        sem_lock();
-        bus->total_children_without_guardian++;
-        sem_unlock();
-
+        sem_lock(); bus->total_children_without_guardian++; sem_unlock();
         ts(b, sizeof(b));
         snprintf(ln, sizeof(ln),
-                 "[%s] [PASAZER %d] Dziecko bez opiekuna - odrzucony (brak opiekuna)\n",
+                 "[%s] [PASAZER %d] Dziecko bez opiekuna - odrzucony\n",
                  b, (int)my_pid);
         log_write(ln);
         log_main(ln);
-
         shmdt(bus);
         return 0;
     }
 
-    /* ===== KROK 5: Niebędący VIP idzie do kasy ===== */
+    /* ===== 5. Opiekun: przygotuj wątek dziecka ===== */
+    pthread_t child_tid = 0;
+    ChildCtx  ctx;
+    if (is_guardian) {
+        pthread_mutex_init(&ctx.mtx,  NULL);
+        pthread_cond_init (&ctx.cond, NULL);
+        ctx.boarded      = 0;
+        ctx.trip_done    = 0;
+        ctx.guardian_pid = my_pid;
+
+        if (pthread_create(&child_tid, NULL, child_thread, &ctx) != 0) {
+            perror("pthread_create child");
+            /* Nie udało się stworzyć wątku – degradujemy do zwykłego pasażera */
+            is_guardian = 0;
+        } else {
+            ts(b, sizeof(b));
+            snprintf(ln, sizeof(ln),
+                     "[%s] [PASAZER %d] Opiekun: watek dziecka uruchomiony\n",
+                     b, (int)my_pid);
+            log_write(ln);
+        }
+    }
+
+    /* ===== 6. Kasa (tylko nie-VIP) ===== */
     if (!is_vip) {
-        /* Sprawdź station_blocked tuż przed wysłaniem do kasy */
         sem_lock();
         sd       = bus->shutdown;
         sblocked = bus->station_blocked;
-
         if (sd || sblocked) {
             bus->total_station_blocked++;
             sem_unlock();
-
             snprintf(ln, sizeof(ln),
                      "[%s] [PASAZER %d] Dworzec zamkniety przed kasa - odchodzi\n",
                      b, (int)my_pid);
             log_write(ln);
+            /* Zakończ wątek dziecka jeśli istnieje */
+            if (is_guardian && child_tid) {
+                pthread_mutex_lock(&ctx.mtx);
+                ctx.boarded = 1;  /* odblokuj wątek... */
+                ctx.trip_done = 1;
+                pthread_cond_broadcast(&ctx.cond);
+                pthread_mutex_unlock(&ctx.mtx);
+                pthread_join(child_tid, NULL);
+                pthread_mutex_destroy(&ctx.mtx);
+                pthread_cond_destroy(&ctx.cond);
+            }
             shmdt(bus);
             return 0;
         }
-
         bus->total_sent_to_cashier++;
         sem_unlock();
 
@@ -257,7 +327,7 @@ int main(void)
         m.pid   = my_pid;
         m.vip   = 0;
         m.bike  = has_bike;
-        m.child = is_guardian; /* sygnalizuje że opiekun ma ze sobą dziecko */
+        m.child = is_guardian;
 
         ts(b, sizeof(b));
         snprintf(ln, sizeof(ln),
@@ -266,36 +336,42 @@ int main(void)
         log_write(ln);
 
         if (msgsnd(msgid, &m, sizeof(m) - sizeof(long), 0) == -1) {
-            if (errno == EIDRM) {
-                shmdt(bus);
-                return 0;
+            if (errno != EIDRM) perror("msgsnd register");
+            if (is_guardian && child_tid) {
+                pthread_mutex_lock(&ctx.mtx);
+                ctx.boarded = 1; ctx.trip_done = 1;
+                pthread_cond_broadcast(&ctx.cond);
+                pthread_mutex_unlock(&ctx.mtx);
+                pthread_join(child_tid, NULL);
+                pthread_mutex_destroy(&ctx.mtx);
+                pthread_cond_destroy(&ctx.cond);
             }
-            perror("msgsnd register");
             shmdt(bus);
             return 0;
         }
 
-        /* Czekaj na bilet z kolejki ODPOWIEDZI (msgid_reply).
-         * Typ = MSG_TICKET_REPLY + pid – unikalna wartość per pasażer,
-         * więc nie ma ryzyka podebrania biletu cudzego pasażera. */
-        long reply_type = MSG_TICKET_REPLY + (long)my_pid;
+        /* Odbierz bilet z kolejki odpowiedzi */
+        long   reply_type = MSG_TICKET_REPLY + (long)my_pid;
         ssize_t rcv;
         do {
             rcv = msgrcv(msgid_reply, &m, sizeof(m) - sizeof(long), reply_type, 0);
         } while (rcv < 0 && errno == EINTR);
 
-        if (rcv < 0) {
-            /* Kolejka usunięta lub inny błąd - system się wyłącza */
-            shmdt(bus);
-            return 0;
-        }
-
-        if (!m.ticket_ok) {
+        if (rcv < 0 || !m.ticket_ok) {
             ts(b, sizeof(b));
             snprintf(ln, sizeof(ln),
-                     "[%s] [PASAZER %d] Kasa odmowila biletu - odchodzi\n",
+                     "[%s] [PASAZER %d] Brak biletu / blad kasy - odchodzi\n",
                      b, (int)my_pid);
             log_write(ln);
+            if (is_guardian && child_tid) {
+                pthread_mutex_lock(&ctx.mtx);
+                ctx.boarded = 1; ctx.trip_done = 1;
+                pthread_cond_broadcast(&ctx.cond);
+                pthread_mutex_unlock(&ctx.mtx);
+                pthread_join(child_tid, NULL);
+                pthread_mutex_destroy(&ctx.mtx);
+                pthread_cond_destroy(&ctx.cond);
+            }
             shmdt(bus);
             return 0;
         }
@@ -305,6 +381,7 @@ int main(void)
                  "[%s] [PASAZER %d] Otrzymal bilet - ide na przystanek\n",
                  b, (int)my_pid);
         log_write(ln);
+
     } else {
         ts(b, sizeof(b));
         snprintf(ln, sizeof(ln),
@@ -312,16 +389,14 @@ int main(void)
         log_write(ln);
     }
 
-    /* ===== KROK 6: Wsiadanie do autobusu ===== */
+    /* ===== 7. Wsiadanie do autobusu ===== */
     /*
-     * Pasażer czeka aż autobus będzie na przystanku i będzie wolne miejsce.
-     * Sprawdzamy i rezerwujemy miejsce pod mutexem (sem[0]), więc nie ma
-     * wyścigu między pasażerami.
-     *
-     * Opiekun potrzebuje 2 miejsc (dla siebie i dziecka).
+     * Opiekun rezerwuje 2 miejsca atomowo pod mutexem.
+     * Dziecko NIE próbuje wejść samodzielnie – wchodzi logicznie
+     * razem z opiekunem, a fizycznie jest powiadamiane przez ctx.boarded.
      */
-    int boarded   = 0;
-    int needed    = is_guardian ? 2 : 1;
+    int boarded = 0;
+    int needed  = is_guardian ? 2 : 1;
 
     while (!boarded) {
         sem_lock();
@@ -333,47 +408,47 @@ int main(void)
             break;
         }
 
-        /* Autobus musi być na przystanku i nie może jeszcze odjeżdżać */
         if (bus->driver_pid != 0 && !bus->departing) {
-            int free_seats = bus->P - bus->passengers;
+            int free_seats = bus->P   - bus->passengers;
             int bike_ok    = !has_bike || (bus->bikes < bus->R);
             int list_ok    = (bus->passenger_count + needed) <= MAX_BUS_CAPACITY;
 
             if (free_seats >= needed && bike_ok && list_ok) {
-                /* Wsiadamy */
+                /* Rezerwujemy miejsca */
                 bus->passengers += needed;
                 if (has_bike) bus->bikes++;
 
-                /* Dodaj siebie do listy pasażerów */
+                /* Wpisujemy opiekuna na listę */
                 bus->passenger_list[bus->passenger_count++] = my_pid;
 
-                /* Jeśli opiekun: dodaj dziecko jako negatywny PID */
+                /* Dziecko jako ujemny PID – driver pominie go przy sem[6] */
                 if (is_guardian) {
                     bus->passenger_list[bus->passenger_count++] = -my_pid;
                     bus->total_children_with_guardian++;
                 }
 
                 boarded = 1;
-
                 ts(b, sizeof(b));
                 snprintf(ln, sizeof(ln),
-                         "[%s] [PASAZER %d] Wsiadt do autobusu "
-                         "(miejsca: %d/%d, rowery: %d/%d, opiekun=%d)\n",
+                         "[%s] [PASAZER %d] Wsiadl (miejsca: %d/%d row: %d/%d opiekun=%d)\n",
                          b, (int)my_pid,
-                         bus->passengers, bus->P,
-                         bus->bikes, bus->R,
-                         is_guardian);
+                         bus->passengers, bus->P, bus->bikes, bus->R, is_guardian);
                 log_write(ln);
                 log_main(ln);
-
                 sem_unlock();
+
+                /* Powiadom wątek dziecka że oboje wsiedli */
+                if (is_guardian && child_tid) {
+                    pthread_mutex_lock(&ctx.mtx);
+                    ctx.boarded = 1;
+                    pthread_cond_broadcast(&ctx.cond);
+                    pthread_mutex_unlock(&ctx.mtx);
+                }
             } else {
-                /* Brak miejsca - czekaj */
                 sem_unlock();
                 sleep(1);
             }
         } else {
-            /* Brak autobusu lub właśnie odjeżdża */
             sem_unlock();
             sleep(1);
         }
@@ -382,28 +457,50 @@ int main(void)
     if (!boarded) {
         ts(b, sizeof(b));
         snprintf(ln, sizeof(ln),
-                 "[%s] [PASAZER %d] Nie wsiadt (shutdown/blokada)\n",
-                 b, (int)my_pid);
+                 "[%s] [PASAZER %d] Nie wsiadt – shutdown/blokada\n", b, (int)my_pid);
         log_write(ln);
+        /* Zakończ wątek dziecka bezpiecznie */
+        if (is_guardian && child_tid) {
+            pthread_mutex_lock(&ctx.mtx);
+            ctx.boarded = 1; ctx.trip_done = 1;
+            pthread_cond_broadcast(&ctx.cond);
+            pthread_mutex_unlock(&ctx.mtx);
+            pthread_join(child_tid, NULL);
+            pthread_mutex_destroy(&ctx.mtx);
+            pthread_cond_destroy(&ctx.cond);
+        }
         shmdt(bus);
         return 0;
     }
 
-    /* ===== KROK 7: Czekanie na powrót autobusu ===== */
+    /* ===== 8. Czekanie na powrót autobusu ===== */
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln),
-             "[%s] [PASAZER %d] W autobusie - czeka na powrot\n",
-             b, (int)my_pid);
+             "[%s] [PASAZER %d] W autobusie - czeka na powrot\n", b, (int)my_pid);
     log_write(ln);
 
     wait_for_trip_end(my_pid);
 
+    /* Powiadom wątek dziecka że autobus wrócił */
+    if (is_guardian && child_tid) {
+        pthread_mutex_lock(&ctx.mtx);
+        ctx.trip_done = 1;
+        pthread_cond_broadcast(&ctx.cond);
+        pthread_mutex_unlock(&ctx.mtx);
+    }
+
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln),
-             "[%s] [PASAZER %d] Wrocil z trasy - koniec pracy\n",
-             b, (int)my_pid);
+             "[%s] [PASAZER %d] Wrocil z trasy - koniec pracy\n", b, (int)my_pid);
     log_write(ln);
     log_main(ln);
+
+    /* Czekaj na zakończenie wątku dziecka przed zwolnieniem zasobów */
+    if (is_guardian && child_tid) {
+        pthread_join(child_tid, NULL);
+        pthread_mutex_destroy(&ctx.mtx);
+        pthread_cond_destroy(&ctx.cond);
+    }
 
     shmdt(bus);
     return 0;

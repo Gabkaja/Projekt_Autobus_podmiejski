@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
 
     srand((unsigned)time(NULL));
 
-    for (int i=0;i<3000;i++) {
+    for (int i=0;i<5000;i++) {
 		// Losowy odstęp 1-3 sekundy
         int delay = 1 + (rand() % 3);
         //sleep(delay);
