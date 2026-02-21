@@ -1,16 +1,3 @@
-/*
- * main.c
- * 
- * Główny proces zarządzający systemem symulacji dworca autobusowego.
- * Inicjalizuje zasoby IPC, uruchamia procesy potomne i zarządza cyklem życia systemu.
- * 
- * Parametry: N P R T
- *   N - liczba autobusów
- *   P - maksymalna pojemność autobusu
- *   R - maksymalna liczba rowerów
- *   T - czas oczekiwania na dworcu (sekundy)
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -28,11 +15,10 @@
 #include <string.h>
 #include "ipc.h"
 
-int shmid, semid, msgid;
+int shmid, semid, msgid, msgid_reply;
 struct BusState* bus;
 pid_t dispatcher_pid = 0;
 
-/* Zapisuje komunikat do głównego pliku raportu */
 void log_write(const char* s) {
     int fd = open("report.txt", O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd == -1) {
@@ -47,7 +33,6 @@ void log_write(const char* s) {
     }
 }
 
-/* Generuje znacznik czasu w formacie HH:MM:SS */
 void ts(char* buf, size_t n) {
     time_t t = time(NULL);
     struct tm* tm_info = localtime(&t);
@@ -58,10 +43,6 @@ void ts(char* buf, size_t n) {
     strftime(buf, n, "%H:%M:%S", tm_info);
 }
 
-/* 
- * Zwalnia wszystkie zasoby IPC i usuwa pliki kluczy.
- * Błędy EINVAL i EIDRM są ignorowane jako oczekiwane.
- */
 void cleanup() {
     if (shmctl(shmid, IPC_RMID, NULL) == -1) {
         if (errno != EINVAL && errno != EIDRM) {
@@ -78,17 +59,17 @@ void cleanup() {
             perror("msgctl IPC_RMID");
         }
     }
+    if (msgctl(msgid_reply, IPC_RMID, NULL) == -1) {
+        if (errno != EINVAL && errno != EIDRM) {
+            perror("msgctl reply IPC_RMID");
+        }
+    }
     unlink(SHM_PATH);
     unlink(SEM_PATH);
     unlink(MSG_PATH);
+    unlink(MSG_REPLY_PATH);
 }
 
-/*
- * Obsługa SIGINT (Ctrl+C) - inicjuje graceful shutdown:
- * 1. Ustawia flagi shutdown i station_blocked
- * 2. Powiadamia dyspozytora
- * 3. Wysyła wake-up message do kasjera (PID=0)
- */
 void handle_sigint(int sig) {
     (void)sig;
     if (bus) {
@@ -100,19 +81,22 @@ void handle_sigint(int sig) {
         kill(dispatcher_pid, SIGINT);
     }
     
-    /* Budzenie kasjera poprzez pustą wiadomość */
-    key_t msg_key = ftok(MSG_PATH, 'M');
-    if (msg_key != -1) {
-        int msg_id = msgget(msg_key, 0600);
-        if (msg_id != -1) {
-            struct msg wake_msg;
-            wake_msg.type = MSG_REGISTER;
-            wake_msg.pid = 0;  /* PID=0 oznacza wake-up message */
-            wake_msg.vip = 0;
-            wake_msg.bike = 0;
-            wake_msg.child = 0;
-            wake_msg.ticket_ok = 0;
-            msgsnd(msg_id, &wake_msg, sizeof(wake_msg) - sizeof(long), IPC_NOWAIT);
+    /* Budzimy kasjera wysyłając pustą wiadomość (pid=0 = wake-up).
+     * Używamy globalnego msgid – bezpieczne w handlerze sygnału. */
+    if (msgid != -1) {
+        struct msg wake_msg;
+        memset(&wake_msg, 0, sizeof(wake_msg));
+        wake_msg.type = MSG_REGISTER;
+        wake_msg.pid  = 0; /* pid=0 = sygnał wakeup, nie prawdziwy pasażer */
+        msgsnd(msgid, &wake_msg, sizeof(wake_msg) - sizeof(long), IPC_NOWAIT);
+    }
+    
+    /* Budzimy wszystkich pasażerów czekających na powrót autobusu (sem[6]).
+     * Podnosimy MAX_PASSENGERS razy żeby obudzić każdego czekającego. */
+    if (semid != -1) {
+        for (int i = 0; i < MAX_PASSENGERS; i++) {
+            struct sembuf sb = { 6, 1, IPC_NOWAIT };
+            if (semop(semid, &sb, 1) == -1) break; /* przepełnienie */
         }
     }
     
@@ -123,7 +107,6 @@ void handle_sigint(int sig) {
     log_write(ln);
 }
 
-/* Obsługa SIGCHLD - zbiera zakończone procesy potomne (unikanie zombie) */
 void handle_sigchld(int sig) {
     (void)sig;
     int saved_errno = errno;
@@ -151,7 +134,7 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    /* Tworzenie pustych plików logów */
+    // Tworzenie plików logów
     creat("report.txt", 0600);
     creat("driver.log", 0600);
     creat("passenger.log", 0600);
@@ -159,23 +142,24 @@ int main(int argc, char** argv) {
     creat("dispatcher.log", 0600);
     creat("generator.log", 0600);
 
-    /* Tworzenie plików kluczy dla ftok() */
+    // Tworzenie plików kluczy
     creat(SHM_PATH, 0600);
     creat(SEM_PATH, 0600);
     creat(MSG_PATH, 0600);
+    creat(MSG_REPLY_PATH, 0600);
 
-    /* Generowanie kluczy IPC */
     key_t shm_key = ftok(SHM_PATH, 'S');
     key_t sem_key = ftok(SEM_PATH, 'E');
     key_t msg_key = ftok(MSG_PATH, 'M');
+    key_t msg_reply_key = ftok(MSG_REPLY_PATH, 'R');
 
-    if (shm_key == -1 || sem_key == -1 || msg_key == -1) {
+    if (shm_key == -1 || sem_key == -1 || msg_key == -1 || msg_reply_key == -1) {
         perror("ftok");
         cleanup();
         return EXIT_FAILURE;
     }
 
-    /* Alokacja pamięci dzielonej dla BusState */
+    // Tworzenie pamięci dzielonej
     shmid = shmget(shm_key, sizeof(struct BusState), IPC_CREAT | 0600);
     if (shmid == -1) {
         perror("shmget");
@@ -183,7 +167,6 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    /* Podłączenie pamięci dzielonej */
     bus = shmat(shmid, NULL, 0);
     if (bus == (void*)-1) {
         perror("shmat");
@@ -191,38 +174,40 @@ int main(int argc, char** argv) {
         return EXIT_FAILURE;
     }
 
-    /*
-     * Tworzenie 6 semaforów:
-     * [0] mutex - ochrona pamięci dzielonej
-     * [1] gate dla pasażerów z rowerami
-     * [2] gate dla pasażerów bez rowerów
-     * [3] dworzec (tylko jeden autobus)
-     * [4] waiting passengers (nieużywany)
-     * [5] generator limit
-     */
-    semid = semget(sem_key, 6, IPC_CREAT | 0600);
+    // Tworzenie semaforów: 0-mutex, 1-gate bez roweru, 2-gate z rowerem, 3-dworzec, 4-waiting passengers, 5-generator limit, 6-trip_completed
+    semid = semget(sem_key, 7, IPC_CREAT | 0600);
     if (semid == -1) {
         perror("semget");
         cleanup();
         return EXIT_FAILURE;
     }
 
-    semctl(semid, 0, SETVAL, 1);                /* mutex */
-    semctl(semid, 1, SETVAL, 1);                /* gate z rowerem */
-    semctl(semid, 2, SETVAL, 1);                /* gate bez roweru */
-    semctl(semid, 3, SETVAL, 1);                /* dworzec */
-    semctl(semid, 4, SETVAL, 0);                /* waiting passengers */
-    semctl(semid, 5, SETVAL, MAX_PASSENGERS);   /* generator limit */
+    semctl(semid, 0, SETVAL, 1); // mutex
+    semctl(semid, 1, SETVAL, 1); // gate bez roweru
+    semctl(semid, 2, SETVAL, 1); // gate z rowerem
+    semctl(semid, 3, SETVAL, 1); // dworzec (tylko jeden autobus)
+    semctl(semid, 4, SETVAL, 0); // waiting passengers (0 = wszyscy blokują się)
+    semctl(semid, 5, SETVAL, MAX_PASSENGERS); // generator limit
+    semctl(semid, 6, SETVAL, 0); // trip_completed signal (pasażerowie czekają na tym)
 
-    /* Tworzenie kolejki komunikatów */
+    // Tworzenie kolejki komunikatów żądań (pasażer → kasjer)
     msgid = msgget(msg_key, IPC_CREAT | 0600);
     if (msgid == -1) {
-        perror("msgget");
+        perror("msgget req");
         cleanup();
         return EXIT_FAILURE;
     }
 
-    /* Inicjalizacja stanu systemu */
+    // Tworzenie kolejki komunikatów odpowiedzi (kasjer → pasażer)
+    // Oddzielna kolejka zapobiega zapychaniu się przez nagromadzone żądania.
+    msgid_reply = msgget(msg_reply_key, IPC_CREAT | 0600);
+    if (msgid_reply == -1) {
+        perror("msgget reply");
+        cleanup();
+        return EXIT_FAILURE;
+    }
+
+    // Inicjalizacja stanu systemu
     bus->P = P;
     bus->R = R;
     bus->T = T;
@@ -240,15 +225,28 @@ int main(int argc, char** argv) {
     for (int i = 0; i < MAX_BUS_CAPACITY; i++) {
         bus->passenger_list[i] = 0;
     }
+    // Inicjalizacja flag zakończenia podróży (10 milionów - 10MB)
+    memset((void*)bus->passenger_trip_completed, 0, MAX_PID);
 
-    /* Konfiguracja obsługi sygnałów */
+    // ========== INICJALIZACJA NOWYCH LICZNIKÓW ==========
+    bus->total_bikes = 0;
+    bus->total_children_with_guardian = 0;
+    bus->total_children_without_guardian = 0;
+    bus->total_vip = 0;
+    bus->total_non_vip = 0;
+    bus->cashier_processed = 0;
+    bus->generator_created = 0;
+    bus->total_station_blocked = 0;
+    bus->total_sent_to_cashier = 0;
+
+    // Obsługa sygnałów
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handle_sigint;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGUSR2, &sa, NULL);  /* SIGUSR2 działa jak SIGINT */
+    sigaction(SIGUSR2, &sa, NULL);  // SIGUSR2 robi to samo co SIGINT
 
     struct sigaction sa_chld;
     memset(&sa_chld, 0, sizeof(sa_chld));
@@ -259,12 +257,12 @@ int main(int argc, char** argv) {
 
     char b[64];
     ts(b, sizeof(b));
-    char ln[256];
+    char ln[512];
     snprintf(ln, sizeof(ln), "[%s] [MAIN] Start systemu: N=%d P=%d R=%d T=%d\n", 
              b, N, P, R, T);
     log_write(ln);
 
-    /* Tworzenie N procesów kierowców */
+    // Tworzenie kierowców (N autobusów)
     for (int i = 0; i < N; i++) {
         pid_t p = fork();
         if (p == -1) {
@@ -277,7 +275,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    /* Tworzenie kasjera */
+    // Tworzenie kasjera
     pid_t p1 = fork();
     if (p1 == -1) {
         perror("fork cashier");
@@ -288,7 +286,7 @@ int main(int argc, char** argv) {
         _exit(1);
     }
 
-    /* Tworzenie dyspozytora */
+    // Tworzenie dyspozytora
     pid_t p2 = fork();
     if (p2 == -1) {
         perror("fork dispatcher");
@@ -300,7 +298,7 @@ int main(int argc, char** argv) {
     }
     dispatcher_pid = p2;
 
-    /* Tworzenie generatora pasażerów */
+    // Tworzenie generatora pasażerów
     pid_t p3 = fork();
     if (p3 == -1) {
         perror("fork generator");
@@ -311,7 +309,7 @@ int main(int argc, char** argv) {
         _exit(1);
     }
 
-    /* Oczekiwanie na zakończenie wszystkich procesów */
+    // Czekanie na zakończenie wszystkich procesów
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln), "[%s] [MAIN] Czekam na zakonczenie wszystkich procesow...\n", b);
     log_write(ln);
@@ -325,14 +323,132 @@ int main(int argc, char** argv) {
     snprintf(ln, sizeof(ln), "[%s] [MAIN] Zakonczono %d procesow\n", b, count);
     log_write(ln);
 
+    // ========== PODSUMOWANIE STATYSTYK ==========
+    ts(b, sizeof(b));
+    snprintf(ln, sizeof(ln), "\n");
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "========================================\n");
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "[%s] PODSUMOWANIE SYMULACJI\n", b);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "========================================\n");
+    log_write(ln);
+    
+    snprintf(ln, sizeof(ln), "Parametry systemu:\n");
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Liczba autobusow (N): %d\n", N);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Pojemnosc autobusu (P): %d\n", P);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Max rowerow w autobusie (R): %d\n", R);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Czas oczekiwania na dworcu (T): %d s\n", T);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "\n");
+    log_write(ln);
+    
+    snprintf(ln, sizeof(ln), "Statystyki pasazerow:\n");
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Pasazerow utworzonych przez generator: %d\n", bus->generator_created);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Pasazerow obsluzonych przez kase: %d\n", bus->cashier_processed);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Pasazerow przewiezionych autobusem: %d\n", bus->boarded_passengers);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "\n");
+    log_write(ln);
+    
+    snprintf(ln, sizeof(ln), "Typy pasazerow:\n");
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - VIP (bez kasy): %d\n", bus->total_vip);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Zwykli (przez kase): %d\n", bus->total_non_vip- bus->total_children_without_guardian);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "\n");
+    log_write(ln);
+    
+    snprintf(ln, sizeof(ln), "Rowery:\n");
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Pasazerow z rowerami: %d\n", bus->total_bikes);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "\n");
+    log_write(ln);
+    
+    snprintf(ln, sizeof(ln), "Dzieci:\n");
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Dzieci z opiekunem (wsiedli): %d\n", bus->total_children_with_guardian);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Dzieci bez opiekuna (odrzucone): %d\n", bus->total_children_without_guardian);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "\n");
+    log_write(ln);
+    
+    snprintf(ln, sizeof(ln), "Weryfikacja spójności:\n");
+    log_write(ln);
+    int total_passengers_calc = bus->total_vip + bus->total_non_vip;
+    int expected_cashier = bus->total_sent_to_cashier;
+    snprintf(ln, sizeof(ln), "  - VIP + Zwykli + Odrzucone dzieci = %d + %d + %d = %d\n", 
+             bus->total_vip, bus->total_non_vip, bus->total_children_without_guardian, total_passengers_calc);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Pasazerow wyslanych do kasy: %d\n", bus->total_sent_to_cashier);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Pasazerow zablokowanych przez dworzec: %d\n", bus->total_station_blocked);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Generator utworzyl: %d\n", bus->generator_created);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Kasa obsluzyla: %d (powinno byc = wyslanych = %d)\n",
+             bus->cashier_processed, expected_cashier);
+    log_write(ln);
+    snprintf(ln, sizeof(ln), "  - Autobusy przewiozly: %d\n", bus->boarded_passengers);
+    log_write(ln);
+    
+    if (bus->cashier_processed == expected_cashier) {
+        snprintf(ln, sizeof(ln), "  OK Kasa obsluzyla poprawna liczbe pasazerow\n");
+    } else {
+        snprintf(ln, sizeof(ln), "  NIEZGODNOSC: Kasa vs wyslani (%d != %d)\n", 
+                 bus->cashier_processed, expected_cashier);
+    }
+    log_write(ln);
+    
+    snprintf(ln, sizeof(ln), "========================================\n");
+    log_write(ln);
+
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln), "[%s] [MAIN] System zakonczony\n", b);
     log_write(ln);
-
+    
+    // Wyświetlenie podstawowego podsumowania na stdout
+    printf("\n");
+    printf("========================================\n");
+    printf("PODSUMOWANIE SYMULACJI\n");
+    printf("========================================\n");
+    printf("Parametry: N=%d P=%d R=%d T=%ds\n", N, P, R, T);
+    printf("\n");
+    printf("Pasazerowie:\n");
+    printf("  Generator utworzyl:     %d\n", bus->generator_created);
+    printf("  Kasa obsluzyla:         %d\n", bus->cashier_processed);
+    printf("  Autobusy przewiozly:    %d\n", bus->boarded_passengers);
+    printf("\n");
+    printf("Typy:\n");
+    printf("  VIP:                    %d\n", bus->total_vip);
+    printf("  Zwykli (przez kase):    %d\n", bus->total_sent_to_cashier);
+    printf("  Z rowerami:             %d\n", bus->total_bikes);
+    printf("  Dzieci z opiekunem:     %d\n", bus->total_children_with_guardian);
+    printf("  Dzieci bez opiekuna:    %d\n", bus->total_children_without_guardian);
+    printf("  Zablokowane (shutdown): %d\n", bus->total_station_blocked);
+    printf("\n");
+    printf("Weryfikacja:\n");
+    printf("  Wyslanych do kasy:      %d\n", bus->total_sent_to_cashier);
+    printf("  Kasa obsluzyla:         %d\n", bus->cashier_processed);
+    printf("  Kasa == Wyslani? %s\n", 
+           bus->cashier_processed == expected_cashier ? "TAK" : "NIE");
+    printf("========================================\n");
+    printf("\nSzczegoly w pliku report.txt\n");
+    
     if (shmdt(bus) == -1) {
         perror("shmdt");
     }
-
+    
     cleanup();
     return 0;
 }

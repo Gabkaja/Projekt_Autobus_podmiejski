@@ -1,11 +1,3 @@
-/*
- * passenger_generator.c
- * 
- * Generator pasażerów - tworzy nowe procesy pasażerów w nieskończonej pętli.
- * Odstępy między pasażerami: losowo 1-3 sekundy.
- * Kończy pracę gdy zostanie ustawiona flaga shutdown lub station_blocked.
- */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -23,7 +15,6 @@
 int shmid, semid;
 struct BusState* bus;
 
-/* Generuje znacznik czasu HH:MM:SS */
 void ts(char* buf, size_t n) {
     time_t t = time(NULL);
     struct tm* tm_info = localtime(&t);
@@ -34,7 +25,6 @@ void ts(char* buf, size_t n) {
     strftime(buf, n, "%H:%M:%S", tm_info);
 }
 
-/* Zapis do logu generatora */
 void log_write(const char* s) {
     int fd = open("generator.log", O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd == -1) return;
@@ -42,7 +32,6 @@ void log_write(const char* s) {
     close(fd);
 }
 
-/* Zapis do głównego raportu */
 void log_main(const char* s) {
     int fd = open("report.txt", O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd == -1) return;
@@ -50,26 +39,31 @@ void log_main(const char* s) {
     close(fd);
 }
 
-/* Blokada mutexa */
 void sem_lock() {
     struct sembuf sb = { 0, -1, SEM_UNDO };
-    semop(semid, &sb, 1);
+    while (semop(semid, &sb, 1) == -1) {
+        if (errno == EINTR) continue;
+        if (errno == EIDRM || errno == EINVAL) return;
+        return;
+    }
 }
 
-/* Odblokowanie mutexa */
 void sem_unlock() {
     struct sembuf sb = { 0, 1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
-/*
- * Obsługa SIGCHLD - zbiera zakończone procesy pasażerów.
- * Zapobiega powstawaniu zombie processes.
- */
 void handle_sigchld(int sig) {
     (void)sig;
     int saved_errno = errno;
-    while (waitpid(-1, NULL, WNOHANG) > 0) {
+    int status;
+    pid_t pid;
+    
+    // Zbieramy wszystkie zakończone procesy
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        // Zwolnij slot w semaforze generator_limit (sem[5])
+        struct sembuf sb = { 5, 1, 0 };  // Bez SEM_UNDO!
+        semop(semid, &sb, 1);
     }
     errno = saved_errno;
 }
@@ -78,7 +72,6 @@ int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
 
-    /* Generowanie kluczy IPC */
     key_t shm_key = ftok(SHM_PATH, 'S');
     key_t sem_key = ftok(SEM_PATH, 'E');
 
@@ -87,9 +80,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    /* Podłączenie do zasobów IPC (6 semaforów) */
     shmid = shmget(shm_key, sizeof(struct BusState), 0600);
-    semid = semget(sem_key, 6, 0600);
+    semid = semget(sem_key, 7, 0600);  // 7 semaforów
 
     if (shmid == -1 || semid == -1) {
         perror("get ipc");
@@ -102,7 +94,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    /* Konfiguracja obsługi SIGCHLD */
+    // Ustawiamy handler SIGCHLD
     struct sigaction sa_chld;
     memset(&sa_chld, 0, sizeof(sa_chld));
     sa_chld.sa_handler = handle_sigchld;
@@ -115,22 +107,17 @@ int main(int argc, char** argv) {
     char b[64];
     ts(b, sizeof(b));
     char ln[128];
-    snprintf(ln, sizeof(ln), "[%s] [GENERATOR] Start - tworzy pasazerow w nieskonczonosc\n", b);
+    snprintf(ln, sizeof(ln), "[%s] [GENERATOR] Start\n", b);
     log_write(ln);
     log_main(ln);
 
     srand((unsigned)time(NULL));
 
-    /*
-     * GŁÓWNA PĘTLA GENERATORA
-     * Tworzy nowe procesy pasażerów aż do shutdown.
-     */
-    for (;;) {
-        /* Losowy odstęp 1-3 sekundy */
+    for (int i=0;i<3000;i++) {
+		// Losowy odstęp 1-3 sekundy
         int delay = 1 + (rand() % 3);
-        sleep(delay);
-
-        /* Sprawdzamy shutdown */
+        //sleep(delay);
+        // Sprawdź shutdown
         sem_lock();
         int sd = bus->shutdown;
         int sb = bus->station_blocked;
@@ -140,33 +127,76 @@ int main(int argc, char** argv) {
             break;
         }
 
-        /*
-         * Inkrementujemy licznik aktywnych pasażerów.
-         * Proces pasażera zdekrementuje go po zakończeniu.
-         */
+        // BLOKUJ na semaforze 5 - czeka aż będzie wolny slot (max 100 pasażerów)
+        // Gdy pasażer zakończy pracę -> SIGCHLD -> semop(5, +1) -> generator budzi się i tworzy nowego
+        struct sembuf sb_wait = { 5, -1, 0 };  // Bez SEM_UNDO!
+        if (semop(semid, &sb_wait, 1) == -1) {
+            if (errno == EIDRM || errno == EINVAL) {
+                // Semafory usunięte - kończymy
+                break;
+            }
+            if (errno == EINTR) {
+                // Przerwane przez sygnał - sprawdź shutdown i próbuj ponownie
+                continue;
+            }
+            perror("semop generator_limit");
+            break;
+        }
+
+        // Mamy slot - sprawdź ponownie shutdown przed forkiem
         sem_lock();
-        bus->active_passengers++;
+        sd = bus->shutdown;
+        sb = bus->station_blocked;
         sem_unlock();
 
-        /* Tworzenie nowego procesu pasażera */
+        if (sd || sb) {
+            // Zwolnij slot i zakończ
+            struct sembuf sb_rel = { 5, 1, 0 };
+            semop(semid, &sb_rel, 1);
+            break;
+        }
+
+        // ========== INKREMENTACJA LICZNIKA: GENERATOR UTWORZYŁ ==========
+        sem_lock();
+        bus->generator_created++;
+        sem_unlock();
+
+        // Tworzymy pasażera
         pid_t p = fork();
         if (p == -1) {
             perror("fork passenger");
+            // Fork się nie udał - zwolnij slot i cofnij licznik
+            struct sembuf sb_rel = { 5, 1, 0 };
+            semop(semid, &sb_rel, 1);
             sem_lock();
-            bus->active_passengers--;
+            bus->generator_created--;
             sem_unlock();
+            continue;
         }
         else if (p == 0) {
-            /* Proces potomny - uruchamiamy passenger */
+            // Proces dziecka - exec passenger
             execl("./passenger", "passenger", NULL);
             perror("exec passenger");
             _exit(1);
         }
-        /* Proces rodzica kontynuuje pętlę */
+        
+        // Rodzic - pasażer utworzony, natychmiast wracamy do pętli!
+        // Gdy tylko pasażer zakończy pracę -> SIGCHLD zwolni slot -> tworzymy nowego
     }
 
+    // KLUCZOWE: czekamy na zakończenie WSZYSTKICH procesów pasażerów
+    // zanim generator wyjdzie. Main czeka tylko na bezpośrednie dzieci
+    // (wait() nie widzi wnuków), więc gdyby generator wyszedł przed
+    // pasażerami, main odczytałby statystyki zanim pasażerowie skończyli
+    // aktualizować liczniki w shared memory → rozbieżność w statystykach.
+    //
+    // Wyłączamy handler SIGCHLD (już niepotrzebny - nie tworzymy nowych
+    // pasażerów) i czekamy blokująco na wszystkich pozostałych.
+    signal(SIGCHLD, SIG_DFL);
+    while (waitpid(-1, NULL, 0) > 0 || errno == EINTR);
+
     ts(b, sizeof(b));
-    snprintf(ln, sizeof(ln), "[%s] [GENERATOR] Koniec pracy\n", b);
+    snprintf(ln, sizeof(ln), "[%s] [GENERATOR] Koniec pracy (wszyscy pasazerowie zakonczeni)\n", b);
     log_write(ln);
     log_main(ln);
 

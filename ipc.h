@@ -1,73 +1,74 @@
-/*
- * ipc.h
- * 
- * Definicje struktur i stałych dla systemu komunikacji międzyprocesowej.
- * Zawiera wspólne definicje używane przez wszystkie procesy w systemie
- * symulacji dworca autobusowego.
- */
-
 #ifndef IPC_H
 #define IPC_H
 
 #include <sys/types.h>
 
-/* Ścieżki do plików kluczy dla ftok() */
-#define SHM_PATH "bus_shm.key"
-#define SEM_PATH "bus_sem.key"
-#define MSG_PATH "bus_msg.key"
+#define SHM_PATH      "bus_shm.key"
+#define SEM_PATH      "bus_sem.key"
+#define MSG_PATH      "bus_msg.key"       /* kolejka żądań:  pasażer → kasjer  */
+#define MSG_REPLY_PATH "bus_msg_reply.key" /* kolejka odpow.: kasjer  → pasażer */
 
-/* Typy wiadomości w kolejce komunikatów */
-#define MSG_REGISTER 1            /* Rejestracja pasażera w kasie */
-#define MSG_TICKET_REPLY 2        /* Odpowiedź z biletem (+ PID pasażera) */
-#define MSG_BUS_RETURNED 10000000 /* Powiadomienie o powrocie (+ PID pasażera) */
+/* Typy wiadomości w kolejce żądań (MSG_PATH) */
+#define MSG_REGISTER      1   /* pasażer rejestruje się u kasjera            */
 
-/* Limity systemu */
-#define MAX_PASSENGERS 10         /* Limit aktywnych procesów pasażerów */
-#define MAX_BUS_CAPACITY 200      /* Maksymalna pojemność jednego autobusu */
+/* Typy wiadomości w kolejce odpowiedzi (MSG_REPLY_PATH).
+ * Każdy pasażer czeka na typ = MSG_TICKET_BASE + own_pid,
+ * więc nie może przypadkowo odebrać biletu innego pasażera. */
+#define MSG_TICKET_BASE   1   /* kasjer używa type = MSG_TICKET_BASE + pid    */
 
-/* 
- * Struktura przechowująca globalny stan systemu w pamięci dzielonej.
- * Współdzielona między wszystkimi procesami, dostęp chroniony semaforami.
- */
+/* Stara makrodefinicja zachowana dla kompatybilności z ewentualnymi
+ * fragmentami kodu, które jeszcze z niej korzystają. */
+#define MSG_TICKET_REPLY  MSG_TICKET_BASE
+#define MSG_BUS_RETURNED  10000000
+
+#define MAX_PASSENGERS 5000
+// MAX_BUS_CAPACITY = maksymalna pojemność JEDNEGO autobusu
+// (górny limit dla parametru P)
+#define MAX_BUS_CAPACITY 500
+
+// MAX_PID - maksymalny obsługiwany PID (10 milionów)
+// Nowoczesne Linuxy mają PID-y w milionach, więc potrzebujemy dużej tablicy
+// 10MB shared memory to akceptowalne dla stabilności
+#define MAX_PID 10000000
+
 struct BusState {
-    /* Parametry konfiguracyjne (ustawiane przy starcie, tylko odczyt) */
-    int P;                      /* Maksymalna liczba pasażerów w autobusie */
-    int R;                      /* Maksymalna liczba rowerów w autobusie */
-    int T;                      /* Czas oczekiwania na dworcu (sekundy) */
-    int N;                      /* Liczba autobusów */
+    int P;                      // Maksymalna liczba pasażerów
+    int R;                      // Maksymalna liczba rowerów
+    int T;                      // Czas oczekiwania na dworcu
+    int N;                      // Liczba autobusów
+    int passengers;             // Aktualna liczba pasażerów w autobusie
+    int bikes;                  // Aktualna liczba rowerów w autobusie
+    int departing;              // Flaga: autobus odjeżdża
+    int station_blocked;        // Flaga: dworzec zablokowany
+    int active_passengers;      // Liczba aktywnych pasażerów w systemie
+    int boarded_passengers;     // Liczba pasażerów, którzy weszli do autobusu
+    pid_t driver_pid;           // PID aktualnego kierowcy na dworcu
+    int shutdown;               // Flaga: system się wyłącza
+    pid_t passenger_list[MAX_BUS_CAPACITY];  // Lista PID-ów pasażerów w busie
+    int passenger_count;        // Liczba pasażerów na liście
+    int generator_count;        // Liczba pasażerów aktywnych według generatora (limit 100)
+    volatile char passenger_trip_completed[MAX_PID];  // Flagi zakończenia podróży (indeks = PID, 10MB)
     
-    /* Stan aktualnie stojącego autobusu */
-    int passengers;             /* Aktualna liczba pasażerów w autobusie */
-    int bikes;                  /* Aktualna liczba rowerów w autobusie */
-    int departing;              /* Flaga: autobus odjeżdża (blokada wsiadań) */
-    
-    /* Stan globalny systemu */
-    int station_blocked;        /* Flaga: dworzec zablokowany */
-    int active_passengers;      /* Liczba wszystkich aktywnych pasażerów */
-    int boarded_passengers;     /* Łączna liczba pasażerów którzy wsiedli */
-    pid_t driver_pid;           /* PID kierowcy na dworcu (0 = brak) */
-    int shutdown;               /* Flaga: system się wyłącza */
-    
-    /* Lista pasażerów w aktualnie stojącym autobusie */
-    pid_t passenger_list[MAX_BUS_CAPACITY];  /* PID-y (ujemne = dzieci) */
-    int passenger_count;        /* Liczba wpisów w liście */
-    
-    /* Statystyki */
-    int generator_count;        /* Liczba aktywnych pasażerów (limit MAX_PASSENGERS) */
+    // ========== NOWE LICZNIKI STATYSTYCZNE ==========
+    int total_bikes;                        // Całkowita liczba rowerów
+    int total_children_with_guardian;       // Dzieci z opiekunem (wsiedli)
+    int total_children_without_guardian;    // Dzieci bez opiekuna (odrzucone)
+    int total_vip;                          // Pasażerowie VIP
+    int total_non_vip;                      // Pasażerowie nie-VIP
+    int cashier_processed;                  // Liczba pasażerów obsłużonych przez kasę
+    int generator_created;                  // Liczba pasażerów stworzonych przez generator
+    int total_station_blocked;             // Pasażerowie odrzuceni przez station_blocked (nie dotarli do kasy)
+    int total_sent_to_cashier;             // Pasażerowie faktycznie wysłani do kasy (nie-VIP przed msgsnd)
 };
 
-/*
- * Struktura wiadomości przesyłanej przez kolejkę komunikatów.
- * Pole 'type' służy do routingu - każdy proces odbiera tylko swoje wiadomości.
- */
 struct msg {
-    long type;           /* Typ wiadomości (routing) */
-    pid_t pid;           /* PID pasażera */
-    int vip;             /* Flaga: pasażer VIP (ma już bilet) */
-    int bike;            /* Flaga: pasażer ma rower */
-    int child;           /* Flaga: pasażer ma dziecko (wątek) */
-    int ticket_ok;       /* Flaga: bilet wystawiony/zatwierdzony */
-    pid_t driver_pid;    /* PID kierowcy (w powiadomieniu o powrocie) */
+    long type;
+    pid_t pid;
+    int vip;
+    int bike;
+    int child;
+    int ticket_ok;
+    pid_t driver_pid;           // PID kierowcy który wrócił
 };
 
 #endif
