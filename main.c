@@ -387,8 +387,7 @@ int main(int argc, char** argv) {
     log_write(ln);
     int total_passengers_calc = bus->total_vip + bus->total_non_vip;
     int expected_cashier = bus->total_sent_to_cashier;
-    snprintf(ln, sizeof(ln), "  - VIP + Zwykli + Odrzucone dzieci = %d + %d + %d = %d\n", 
-             bus->total_vip, bus->total_non_vip, bus->total_children_without_guardian, total_passengers_calc);
+    snprintf(ln, sizeof(ln), "  - VIP + Zwykli + Odrzucone dzieci = %d\n", total_passengers_calc);
     log_write(ln);
     snprintf(ln, sizeof(ln), "  - Pasazerow wyslanych do kasy: %d\n", bus->total_sent_to_cashier);
     log_write(ln);

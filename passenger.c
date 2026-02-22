@@ -1,13 +1,15 @@
 /*
  * passenger.c – Proces pasażera
  *
- * Typy pasażerów (losowe):
- *   VIP              (~20%) – omija kasę
- *   Dziecko samotne  (~10%) – odrzucane natychmiast (brak opiekuna)
- *   Z rowerem        (~20%) – idzie do kasy, potrzebuje miejsca na rower
- *   Opiekun+dziecko  (~15%) – idzie do kasy, rezerwuje 2 miejsca;
- *                             dziecko = pthread wewnątrz tego procesu
- *   Zwykły           (~35%) – idzie do kasy
+ * Wiek pasażera losowany z przedziału [1, 80] lat.
+ * Pasażer poniżej 8 lat bez opiekuna jest odrzucany natychmiast.
+ *
+ * Typy pasażerów (dla osób w wieku >= 8 lat):
+ *   VIP              ( 1%) – omija kasę
+ *   Opiekun+dziecko  (24%) – idzie do kasy, rezerwuje 2 miejsca;
+ *                            dziecko = pthread wewnątrz tego procesu
+ *   Z rowerem        (25%) – idzie do kasy, potrzebuje miejsca na rower
+ *   Zwykły           (50%) – idzie do kasy
  *
  * Synchronizacja IPC:
  *   sem[0]  – mutex ogólny dla shared memory
@@ -231,18 +233,37 @@ int main(void)
         return 0;
     }
 
-    /* ===== 2. Losuj typ pasażera ===== */
-    int r             = rand() % 100;
-    int is_vip        = (r < 20);
-    int is_lone_child = (!is_vip && r < 30);               /* 10% */
-    int has_bike      = (!is_vip && !is_lone_child && r < 50); /* 20% */
-    int is_guardian   = (!is_vip && !is_lone_child && !has_bike && r < 65); /* 15% */
-    /* pozostałe ~35% = zwykły */
+    /* ===== 2. Losuj wiek i typ pasażera ===== */
+    /*
+     * Wiek: 1–80 lat (jednostajny rozkład).
+     * Pasażer poniżej 8 lat = dziecko bez opiekuna → odrzucany natychmiast.
+     *
+     * Dla pozostałych (wiek >= 8):
+     *   r % 100:
+     *    0        → VIP       ( 1%)
+     *    1–24     → opiekun   (24%)
+     *    25–49    → rowerzysta(25%)
+     *    50–99    → zwykły    (50%)
+     */
+    int age           = 1 + rand() % 80;
+    int is_lone_child = (age < 8);       /* wiek < 8 → brak opiekuna */
+
+    int is_vip      = 0;
+    int is_guardian = 0;
+    int has_bike    = 0;
+
+    if (!is_lone_child) {
+        int r   = rand() % 100;
+        is_vip      = (r == 0);                                  /*  1% */
+        is_guardian = (!is_vip && r <= 24);                      /* 24% */
+        has_bike    = (!is_vip && !is_guardian && r <= 49);      /* 25% */
+        /* pozostałe 50% = zwykły */
+    }
 
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln),
-             "[%s] [PASAZER %d] Start: VIP=%d SAM_DZIECKO=%d ROWER=%d OPIEKUN=%d\n",
-             b, (int)my_pid, is_vip, is_lone_child, has_bike, is_guardian);
+             "[%s] [PASAZER %d] Start: WIEK=%d VIP=%d SAM_DZIECKO=%d ROWER=%d OPIEKUN=%d\n",
+             b, (int)my_pid, age, is_vip, is_lone_child, has_bike, is_guardian);
     log_write(ln);
 
     /* ===== 3. Liczniki typów ===== */
@@ -260,8 +281,8 @@ int main(void)
         sem_lock(); bus->total_children_without_guardian++; sem_unlock();
         ts(b, sizeof(b));
         snprintf(ln, sizeof(ln),
-                 "[%s] [PASAZER %d] Dziecko bez opiekuna - odrzucony\n",
-                 b, (int)my_pid);
+                 "[%s] [PASAZER %d] Dziecko bez opiekuna (wiek=%d lat) - odrzucony\n",
+                 b, (int)my_pid, age);
         log_write(ln);
         log_main(ln);
         shmdt(bus);

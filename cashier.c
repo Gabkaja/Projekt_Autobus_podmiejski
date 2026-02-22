@@ -88,7 +88,7 @@ int main() {
     signal(SIGUSR2, SIG_IGN);
     signal(SIGHUP,  SIG_IGN);
    
-    sleep(10);
+    //sleep(10);
     char b[64];
     ts(b, sizeof(b));
     char ln[128];
