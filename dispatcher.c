@@ -1,3 +1,19 @@
+/*
+ * dispatcher.c – Proces dyspozytora.
+ *
+ * Dyspozytor jest pośrednikiem między operatorem (sygnałami zewnętrznymi)
+ * a kierowcami autobusów. Nie wykonuje żadnej aktywnej pracy – czeka na
+ * sygnały przez pause() i reaguje zgodnie z ich znaczeniem.
+ *
+ * Obsługiwane sygnały:
+ *   SIGINT  – Inicjuje zamknięcie systemu: ustawia flagi shutdown i station_blocked
+ *             w pamięci dzielonej, a następnie kończy własną pętlę.
+ *   SIGUSR1 – Wymusza natychmiastowy odjazd autobusu: przekazuje SIGUSR1 do
+ *             aktualnego kierowcy (bus->driver_pid).
+ *   SIGUSR2 – Blokada dworca: ustawia flagi zamknięcia, wysyła SIGUSR2 do kierowcy
+ *             i do procesu main (getppid()), a następnie kończy pracę.
+ */
+
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
@@ -8,14 +24,20 @@
 #include <time.h>
 #include "ipc.h"
 
+/* Globalne identyfikatory IPC i wskaźnik do pamięci dzielonej */
 int shmid;
 struct BusState* bus;
 
-/* Flaga ustawiana przez handlery sygnałów – pętla główna sprawdza ją
- * po każdym pause() i decyduje czy zakończyć pracę. */
+/* Flaga ustawiana przez handlery sygnałów, by wyjść z pętli głównej */
 volatile sig_atomic_t should_exit = 0;
 
-/* Formatuje aktualny czas jako HH:MM:SS. */
+/* =========================================================
+ * Funkcje pomocnicze: timestamp i logowanie
+ * ========================================================= */
+
+/*
+ * ts – Formatuje bieżącą godzinę do bufora w formacie HH:MM:SS.
+ */
 void ts(char* buf, size_t n) {
     time_t t = time(NULL);
     struct tm* tm_info = localtime(&t);
@@ -26,7 +48,9 @@ void ts(char* buf, size_t n) {
     strftime(buf, n, "%H:%M:%S", tm_info);
 }
 
-/* Dopisuje do prywatnego logu dyspozytora. */
+/*
+ * log_write – Dopisuje wpis do dziennika dyspozytora (dispatcher.log).
+ */
 void log_write(const char* s) {
     int fd = open("dispatcher.log", O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd == -1) return;
@@ -34,7 +58,9 @@ void log_write(const char* s) {
     close(fd);
 }
 
-/* Dopisuje do wspólnego raportu symulacji. */
+/*
+ * log_main – Dopisuje wpis do raportu zbiorczego (report.txt).
+ */
 void log_main(const char* s) {
     int fd = open("report.txt", O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd == -1) return;
@@ -42,15 +68,22 @@ void log_main(const char* s) {
     close(fd);
 }
 
-/* Obsługa SIGINT – inicjuje shutdown całego systemu.
- * Ustawia obie flagi w shared memory i informuje o tym w logu.
- * should_exit = 1 spowoduje że pętla pause() zakończy działanie. */
+/* =========================================================
+ * Handlery sygnałów
+ * ========================================================= */
+
+/*
+ * handle_int – Handler SIGINT.
+ * Ustawia flagi shutdown i station_blocked w pamięci dzielonej,
+ * co powoduje, że kierowcy i pasażerowie zaczną kończyć pracę.
+ * Ustawia should_exit, by wyjść z pętli pause().
+ */
 void handle_int(int sig) {
     (void)sig;
     if (bus) {
         bus->shutdown = 1;
         bus->station_blocked = 1;
-        
+
         char b[64];
         ts(b, sizeof(b));
         char ln[128];
@@ -61,13 +94,16 @@ void handle_int(int sig) {
     should_exit = 1;
 }
 
-/* Obsługa SIGUSR1 – wymuszony odjazd autobusu.
- * Dyspozytor przekazuje sygnał dalej do aktualnego kierowcy,
- * który po otrzymaniu SIGUSR1 natychmiast odjedzie z dworca. */
+/*
+ * handle_usr1 – Handler SIGUSR1.
+ * Przekazuje SIGUSR1 bezpośrednio do kierowcy stojącego na dworcu,
+ * wymuszając natychmiastowy odjazd bez oczekiwania na upłynięcie czasu T.
+ */
 void handle_usr1(int sig) {
     (void)sig;
     if (bus && bus->driver_pid > 0) {
         kill(bus->driver_pid, SIGUSR1);
+
         char b[64];
         ts(b, sizeof(b));
         char ln[128];
@@ -77,22 +113,24 @@ void handle_usr1(int sig) {
     }
 }
 
-/* Obsługa SIGUSR2 – zablokowanie dworca.
- * Ustawia station_blocked i shutdown w shared memory, wysyła SIGUSR2
- * do kierowcy żeby ten wiedział że ma zakończyć pracę po bieżącym kursie,
- * a do procesu main (getppid()) żeby ten też wiedział o blokadzie i
- * zaczął procedurę zamykania. should_exit = 1 kończy pętlę dyspozytora. */
+/*
+ * handle_usr2 – Handler SIGUSR2 (blokada dworca).
+ * Ustawia flagi zamknięcia w pamięci dzielonej, przekazuje SIGUSR2
+ * do kierowcy (by ten nie przyjmował nowych pasażerów) i do procesu
+ * main (by ten zainicjował właściwy shutdown). Kończy własną pętlę.
+ */
 void handle_usr2(int sig) {
     (void)sig;
     if (bus) {
         bus->station_blocked = 1;
         bus->shutdown = 1;
-        if (bus->driver_pid > 0) {
+
+        if (bus->driver_pid > 0)
             kill(bus->driver_pid, SIGUSR2);
-        }
-        
+
+        /* Powiadomienie main o blokadzie – main obsługuje SIGUSR2 tak samo jak SIGINT */
         kill(getppid(), SIGUSR2);
-        
+
         char b[64];
         ts(b, sizeof(b));
         char ln[128];
@@ -103,7 +141,12 @@ void handle_usr2(int sig) {
     should_exit = 1;
 }
 
+/* =========================================================
+ * Funkcja główna dyspozytora
+ * ========================================================= */
+
 int main() {
+    /* Generowanie klucza i podłączenie do pamięci dzielonej */
     key_t shm_key = ftok(SHM_PATH, 'S');
     if (shm_key == -1) {
         perror("ftok shm");
@@ -129,8 +172,8 @@ int main() {
     log_write(ln);
     log_main(ln);
 
-    /* SA_RESTART sprawia że przerwane przez sygnał wywołania systemowe
-     * wznawiają się automatycznie zamiast zwracać EINTR. */
+    /* Rejestracja handlerów sygnałów z SA_RESTART, aby pause() nie przerywało
+     * się przypadkowo przy sygnałach nieobsługiwanych (np. SIGCHLD z tłem). */
     struct sigaction sai;
     memset(&sai, 0, sizeof(sai));
     sai.sa_handler = handle_int;
@@ -152,12 +195,10 @@ int main() {
     sa2.sa_flags = SA_RESTART;
     sigaction(SIGUSR2, &sa2, NULL);
 
-    /* Dyspozytor nie robi nic aktywnie – czeka na sygnały.
-     * pause() usypia proces do momentu nadejścia dowolnego sygnału,
-     * handler go przetwarza, po czym pętla sprawdza should_exit. */
-    while (!should_exit) {
+    /* Pętla główna: dyspozytor nie wykonuje aktywnej pracy – usypia
+     * się przez pause() i jest budzony wyłącznie przez sygnały. */
+    while (!should_exit)
         pause();
-    }
 
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln), "[%s] [DYSPOZYTOR] Koniec pracy\n", b);

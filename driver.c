@@ -1,3 +1,34 @@
+/*
+ * driver.c – Proces kierowcy autobusu.
+ *
+ * Każdy kierowca reprezentuje jeden autobus. W systemie może działać jednocześnie
+ * N procesów kierowcy (N = parametr uruchomienia), lecz tylko jeden może
+ * przebywać na dworcu w danym momencie – gwarantuje to semafor sem[3] (mutex dworca).
+ *
+ * Cykl jednego kursu:
+ *   1. Sprawdzenie flag shutdown/station_blocked – jeśli ustawione, kończenie pracy.
+ *   2. Wzięcie semafora dworca (sem[3]) – czekanie na zwolnienie stacji przez inny autobus.
+ *   3. Rejestracja własnego PID w bus->driver_pid – pasażerowie wiedzą, że autobus stoi.
+ *   4. Oczekiwanie przez T sekund lub do wymuszenia odjazdu przez SIGUSR1.
+ *   5. Zamknięcie bramek pasażerskich (sem[1], sem[2]) – blokada wsiadania.
+ *   6. Skopiowanie listy pasażerów z pamięci dzielonej i wyzerowanie liczników.
+ *   7. Zwolnienie bramek i semafora dworca.
+ *   8. Symulacja jazdy (rand() % 7 + 3 sekund).
+ *   9. Powiadomienie pasażerów o powrocie przez flagę passenger_trip_completed[pid]
+ *      i podniesienie sem[5] dla każdego pasażera.
+ *  10. Powrót do kroku 1.
+ *
+ * Obsługiwane sygnały:
+ *   SIGUSR1 – Wymuszony odjazd: ustawia force_flag, kierowca wyjeżdża natychmiast.
+ *   SIGUSR2 – Blokada dworca: ustawia station_blocked w pamięci dzielonej.
+ *   SIGINT  – Shutdown: ustawia shutdown i station_blocked.
+ *
+ * Kolejność blokowania semaforów (zapobieganie zakleszczeniom):
+ *   Zawsze: mutex ogólny (sem[0]) PRZED bramką/muteksem dworca,
+ *           lub bramka (sem[1]/sem[2]) PRZED mutexem (sem[0]).
+ *   Nigdy odwrotnie.
+ */
+
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
@@ -12,15 +43,17 @@
 #include <stdlib.h>
 #include "ipc.h"
 
+/* Globalne identyfikatory IPC */
 int shmid, semid, msgid;
 struct BusState* bus;
 
-/* Flaga ustawiana przez handler SIGUSR1 (wymuszony odjazd od dyspozytora).
- * volatile sig_atomic_t gwarantuje bezpieczny zapis w handlerze sygnału
- * i odczyt w pętli głównej bez wyścigu. */
+/* Flaga wymuszenia odjazdu – ustawiana przez handler SIGUSR1 */
 volatile sig_atomic_t force_flag = 0;
 
-/* Formatuje aktualny czas jako HH:MM:SS. */
+/* =========================================================
+ * Funkcje pomocnicze: timestamp i logowanie
+ * ========================================================= */
+
 void ts(char* buf, size_t n) {
     time_t t = time(NULL);
     struct tm* tm_info = localtime(&t);
@@ -31,7 +64,6 @@ void ts(char* buf, size_t n) {
     strftime(buf, n, "%H:%M:%S", tm_info);
 }
 
-/* Dopisuje do prywatnego logu kierowcy. */
 void log_write(const char* s) {
     int fd = open("driver.log", O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd == -1) return;
@@ -39,7 +71,6 @@ void log_write(const char* s) {
     close(fd);
 }
 
-/* Dopisuje do wspólnego raportu symulacji. */
 void log_main(const char* s) {
     int fd = open("report.txt", O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd == -1) return;
@@ -47,51 +78,68 @@ void log_main(const char* s) {
     close(fd);
 }
 
-/* Blokujące P(sem[0]) – zajmuje mutex ogólny.
- * Pętla ponawia przy EINTR, kończy gdy IPC zostaje usunięte. */
+/* =========================================================
+ * Operacje na semaforach
+ * ========================================================= */
+
+/*
+ * sem_lock / sem_unlock – Mutex ogólny (sem[0]).
+ * Chroni dostęp do wszystkich pól BusState.
+ * Pętla przy EINTR zapewnia, że mutex zostanie wzięty
+ * mimo przerwania przez sygnał.
+ */
 void sem_lock() {
     struct sembuf sb = { 0, -1, SEM_UNDO };
     while (semop(semid, &sb, 1) == -1) {
-        if (errno == EINTR) continue;
+        if (errno == EINTR)              continue;
         if (errno == EIDRM || errno == EINVAL) return;
         return;
     }
 }
 
-/* V(sem[0]) – zwalnia mutex ogólny. */
 void sem_unlock() {
     struct sembuf sb = { 0, 1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
-/* Blokujące P(sem[gate]) – zajmuje wskazany semafor bramki lub dworca.
- * SEM_UNDO gwarantuje zwolnienie semafora nawet gdy proces kierowcy
- * zostanie niespodziewanie zabity, co zapobiega trwałemu zablokowaniu. */
+/*
+ * gate_lock / gate_unlock – Semafory bramek pasażerskich i dworca.
+ * Parametr gate: 1 = bramka bez roweru, 2 = bramka z rowerem, 3 = mutex dworca.
+ * SEM_UNDO gwarantuje zwolnienie semafora, nawet jeśli kierowca zakończy
+ * się awaryjnie przed jawnym wywołaniem gate_unlock.
+ */
 void gate_lock(int gate) {
     struct sembuf sb = { (unsigned short)gate, -1, SEM_UNDO };
     while (semop(semid, &sb, 1) == -1) {
-        if (errno == EINTR) continue;
+        if (errno == EINTR)              continue;
         if (errno == EIDRM || errno == EINVAL) return;
         return;
     }
 }
 
-/* V(sem[gate]) – zwalnia wskazany semafor bramki lub dworca. */
 void gate_unlock(int gate) {
     struct sembuf sb = { (unsigned short)gate, 1, SEM_UNDO };
     semop(semid, &sb, 1);
 }
 
-/* Handler SIGUSR1 – wymuszony odjazd wysyłany przez dyspozytora.
- * Ustawia tylko flagę; faktyczne odjeżdżanie dzieje się w pętli głównej. */
+/* =========================================================
+ * Handlery sygnałów
+ * ========================================================= */
+
+/*
+ * handle_usr1 – Wymuszenie natychmiastowego odjazdu przez dyspozytora.
+ * Ustawia force_flag; pętla oczekiwania T sekund sprawdza tę flagę.
+ */
 void handle_usr1(int sig) {
     (void)sig;
     force_flag = 1;
 }
 
-/* Handler SIGUSR2 – zablokowanie dworca od dyspozytora.
- * Ustawia station_blocked pod mutexem żeby pasażerowie zobaczyli
- * spójny stan shared memory. */
+/*
+ * handle_usr2 – Blokada dworca przez dyspozytora.
+ * Ustawia station_blocked pod mutexem, aby zmiana była widoczna
+ * dla pasażerów sprawdzających tę flagę.
+ */
 void handle_usr2(int sig) {
     (void)sig;
     sem_lock();
@@ -99,8 +147,11 @@ void handle_usr2(int sig) {
     sem_unlock();
 }
 
-/* Handler SIGINT – globalny shutdown.
- * Ustawia obie flagi pod mutexem. */
+/*
+ * handle_int – Shutdown systemu.
+ * Ustawia zarówno shutdown, jak i station_blocked, co powoduje,
+ * że wszystkie pętle sprawdzające te flagi zakończą się.
+ */
 void handle_int(int sig) {
     (void)sig;
     sem_lock();
@@ -108,6 +159,10 @@ void handle_int(int sig) {
     bus->station_blocked = 1;
     sem_unlock();
 }
+
+/* =========================================================
+ * Funkcja główna kierowcy
+ * ========================================================= */
 
 int main() {
     key_t shm_key = ftok(SHM_PATH, 'S');
@@ -120,7 +175,7 @@ int main() {
     }
 
     shmid = shmget(shm_key, sizeof(struct BusState), 0600);
-    semid = semget(sem_key, 7, 0600);
+    semid = semget(sem_key, 6, 0600);
     msgid = msgget(msg_key, 0600);
 
     if (shmid == -1 || semid == -1 || msgid == -1) {
@@ -134,7 +189,7 @@ int main() {
         return 1;
     }
 
-    /* SA_RESTART żeby przerwane przez sygnał sleep() wznawiały się poprawnie. */
+    /* Rejestracja handlerów sygnałów z SA_RESTART */
     struct sigaction sa1;
     memset(&sa1, 0, sizeof(sa1));
     sa1.sa_handler = handle_usr1;
@@ -156,8 +211,6 @@ int main() {
     sai.sa_flags = SA_RESTART;
     sigaction(SIGINT, &sai, NULL);
 
-    /* XOR pid z czasem daje unikalne ziarno dla każdego z N procesów kierowców,
-     * żeby czasy tras były niezależne od siebie. */
     srand((unsigned)(getpid() ^ time(NULL)));
 
     char b[64];
@@ -167,41 +220,39 @@ int main() {
     log_write(ln);
     log_main(ln);
 
+    /* =========================================================
+     * Pętla kursów
+     * ========================================================= */
     for (;;) {
-        /* Sprawdzamy pod mutexem czy inny kierowca nie zajął już dworca.
-         * Kolejność blokowania: najpierw mutex, potem gate – musi być spójna
-         * z pasażerami którzy blokują gate a potem mutex. Odwrotna kolejność
-         * groziłaby zakleszczeniem. */
+        /*
+         * Sprawdzamy, czy inny kierowca już obsługuje stację.
+         * Mutex ogólny bierzemy przed semaforem dworca (sem[3]),
+         * aby zachować spójną kolejność blokowania.
+         */
         sem_lock();
-        
+
         if (bus->driver_pid != 0 && bus->driver_pid != getpid()) {
             int sd_tmp = bus->shutdown;
             int sb_tmp = bus->station_blocked;
             sem_unlock();
-            
-            if (sd_tmp || sb_tmp) {
-                break;
-            }
-            
+
+            /* Przy shutdown/blokadzie natychmiast przerywamy */
+            if (sd_tmp || sb_tmp) break;
+
             sleep(1);
             continue;
         }
-        
+
         int sb = bus->station_blocked;
         int sd = bus->shutdown;
         sem_unlock();
 
-        if (sd || sb) {
-            break;
-        }
+        if (sd || sb) break;
 
-        /* Bierzemy semafor dworca (sem[3]) – gwarantuje że tylko jeden
-         * autobus stoi na dworcu jednocześnie. Pozostałe autobusy blokują
-         * się tutaj i czekają na swoją kolej. */
+        /* Bierzemy mutex dworca – tylko jeden autobus jednocześnie na stacji */
         gate_lock(3);
-        
-        /* Po wzięciu gate[3] ponownie sprawdzamy driver_pid – inny kierowca
-         * mógł wejść na dworzec między pierwszym sprawdzeniem a gate_lock. */
+
+        /* Ponowna kontrola po wzięciu semafora dworca – stan mógł się zmienić */
         sem_lock();
         if (bus->driver_pid != 0 && bus->driver_pid != getpid()) {
             sem_unlock();
@@ -209,10 +260,10 @@ int main() {
             sleep(1);
             continue;
         }
-        
-        /* Rejestrujemy siebie jako aktualnego kierowcę na dworcu. */
+
+        /* Rejestracja kierowcy i odczyt parametrów */
         bus->driver_pid = getpid();
-        bus->departing = 0;
+        bus->departing  = 0;
         sb = bus->station_blocked;
         sd = bus->shutdown;
         int wait_time = bus->T;
@@ -228,12 +279,14 @@ int main() {
         log_write(ln);
         log_main(ln);
 
-        /* Czekamy T sekund na zapełnienie autobusu lub na sygnał SIGUSR1
-         * od dyspozytora (force_flag). Co sekundę sprawdzamy też flagi
-         * shutdown i station_blocked żeby nie czekać w nieskończoność. */
+        /*
+         * Oczekiwanie na pasażerów przez T sekund.
+         * Pętla sprawdza co sekundę flagę force_flag (wymuszony odjazd)
+         * oraz flagi shutdown/station_blocked.
+         */
         int waited = 0;
         while (!force_flag && waited < wait_time) {
-             sleep(1);
+            sleep(1);
             waited++;
 
             sem_lock();
@@ -250,9 +303,11 @@ int main() {
         int current_passengers = bus->passengers;
         sem_unlock();
 
-        /* Jeśli system się wyłącza i autobus jest pusty – nie ma sensu jechać,
-         * kończymy bez odjeżdżania. Jeśli są pasażerowie, musimy ich odwieźć
-         * nawet przy shutdown – nie można ich zostawić w autobusie. */
+        /*
+         * Przy shutdown bez pasażerów autobus nie wyjeżdża – kończy pracę.
+         * Jeśli jednak są pasażerowie, kierowca musi dokończyć kurs,
+         * aby odpowiedzialnie odwieźć osoby już w autobusie.
+         */
         if ((sd || sb) && current_passengers == 0) {
             gate_unlock(3);
             break;
@@ -260,38 +315,35 @@ int main() {
 
         force_flag = 0;
 
-        /* Zamykamy drzwi: blokujemy obie bramki pasażerskie zanim
-         * ustawimy flagę departing i skopiujemy listę pasażerów.
-         * Kolejność gate[1] → gate[2] → mutex jest spójna z pasażerem
-         * który robi gate[X] → mutex, więc deadlock jest niemożliwy.
-         * Bez blokowania bramek pasażer mógłby wsiąść już po skopiowaniu listy
-         * i nigdy nie zostałby powiadomiony o powrocie autobusu. */
-        gate_lock(1);
-        gate_lock(2);
+        /*
+         * Zamknięcie bramek wsiadania przed odczytem listy pasażerów.
+         * Kolejność: sem[1] → sem[2] → sem[0].
+         * Musi być spójna z kolejnością w passenger.c (gate → mutex),
+         * by nie dopuścić do zakleszczenia.
+         */
+        gate_lock(1);   /* blokada bramki dla pasażerów bez roweru */
+        gate_lock(2);   /* blokada bramki dla pasażerów z rowerem  */
 
         sem_lock();
         bus->departing = 1;
-        int p = bus->passengers;
-        int r = bus->bikes;
+        int p      = bus->passengers;
+        int r      = bus->bikes;
         int pcount = bus->passenger_count;
         bus->boarded_passengers += p;
 
-        /* Kopiujemy listę pasażerów lokalnie, bo za chwilę wyzerujemy
-         * pola shared memory żeby następny autobus mógł przyjechać. */
+        /* Lokalna kopia listy PID-ów pasażerów – potrzebna po zwolnieniu mutex */
         pid_t plist[MAX_BUS_CAPACITY];
-        for (int i = 0; i < pcount && i < MAX_BUS_CAPACITY; i++) {
+        for (int i = 0; i < pcount && i < MAX_BUS_CAPACITY; i++)
             plist[i] = bus->passenger_list[i];
-        }
 
-        /* Zerujemy liczniki – dworzec wolny dla następnego autobusu. */
-        bus->passengers = 0;
-        bus->bikes = 0;
+        /* Reset liczników w pamięci dzielonej przed zwolnieniem mutexu */
+        bus->passengers      = 0;
+        bus->bikes           = 0;
         bus->passenger_count = 0;
-        bus->driver_pid = 0;
+        bus->driver_pid      = 0;
         sem_unlock();
 
-        /* Zwalniamy bramki pasażerskie i semafor dworca jednocześnie –
-         * pasażerowie i kolejny kierowca mogą teraz wejść na dworzec. */
+        /* Otwieramy bramki i zwalniamy dworzec – inny kierowca może teraz wjechać */
         gate_unlock(1);
         gate_unlock(2);
         gate_unlock(3);
@@ -302,22 +354,25 @@ int main() {
         log_write(ln);
         log_main(ln);
 
-        /* Czas trasy: losowy z przedziału 3–9 sekund.
-         * Jeśli autobus jest załadowany, blokujemy SIGINT na czas jazdy –
-         * nie można przerwać trasy z pasażerami w środku.
-         * Jeśli jedzie pusty, można przerwać wcześniej gdy nadejdzie shutdown. */
+        /* Symulacja czasu jazdy: 3–9 sekund (losowo) */
         int Ti = (rand() % 7) + 3;
-        
+
         if (p > 0) {
+            /*
+             * Przy pasażerach blokujemy SIGINT podczas jazdy.
+             * Bez tego: Ctrl+C mógłby przerwać sleep i pasażerowie
+             * nigdy nie doczekaliby się sygnału powrotu.
+             */
             sigset_t sigset, oldset;
             sigemptyset(&sigset);
             sigaddset(&sigset, SIGINT);
             sigprocmask(SIG_BLOCK, &sigset, &oldset);
-            
+
             sleep(Ti);
-            
+
             sigprocmask(SIG_SETMASK, &oldset, NULL);
         } else {
+            /* Pusty autobus może przerwać jazdę wcześniej przy shutdown */
             for (int i = 0; i < Ti; i++) {
                 sleep(1);
                 sem_lock();
@@ -333,69 +388,59 @@ int main() {
         log_write(ln);
         log_main(ln);
 
-        /* Budujemy czytelną listę PID-ów pasażerów do logu.
-         * Ujemne PID-y to dzieci – wyświetlamy je jako "dziecko_PID". */
+        /* Budowanie i logowanie listy PID-ów pasażerów kursu */
         if (pcount > 0) {
             char plist_str[1024] = "[";
             for (int i = 0; i < pcount && i < MAX_BUS_CAPACITY; i++) {
                 char tmp[64];
                 pid_t pid = plist[i];
-                if (pid < 0) {
+                /* Ujemny PID oznacza dziecko podróżujące z opiekunem */
+                if (pid < 0)
                     snprintf(tmp, sizeof(tmp), "dziecko_%d%s", -pid, (i < pcount - 1) ? ", " : "");
-                } else {
+                else
                     snprintf(tmp, sizeof(tmp), "%d%s", pid, (i < pcount - 1) ? ", " : "");
-                }
                 strncat(plist_str, tmp, sizeof(plist_str) - strlen(plist_str) - 1);
             }
             strncat(plist_str, "]", sizeof(plist_str) - strlen(plist_str) - 1);
-            
+
             ts(b, sizeof(b));
-            snprintf(ln, sizeof(ln), "[%s] [KIEROWCA %d] Rozwieziono pasazerow: %s\n", 
+            snprintf(ln, sizeof(ln), "[%s] [KIEROWCA %d] Rozwieziono pasazerow: %s\n",
                      b, getpid(), plist_str);
             log_write(ln);
             log_main(ln);
         }
 
-        /* Powiadamianie pasażerów o powrocie autobusu odbywa się przez
-         * kombinację flagi w tablicy i semafora sem[6].
-         * Najpierw pod mutexem ustawiamy passenger_trip_completed[pid] = 1
-         * dla każdego dorosłego pasażera (dzieci z ujemnym PID pomijamy,
-         * bo wątek dziecka czeka na sygnał od opiekuna, nie na semafor).
-         * Potem poza mutexem podnosimy sem[6] raz na pasażera – każde
-         * podniesienie obudzi dokładnie jednego czekającego pasażera.
-         * Pasażer sprawdza czy token jest jego (po flagi) i jeśli tak – kończy. */
+        /*
+         * Powiadamianie pasażerów o zakończeniu kursu.
+         * Pod mutexem ustawiamy flagę passenger_trip_completed[pid] = 1
+         * dla każdego dorosłego pasażera, następnie podnosimy sem[5] raz
+         * dla każdego z nich, budząc tych, którzy czekają na semop(-1).
+         *
+         * Dzieci (ujemne PID-y) nie mają własnego procesu oczekującego –
+         * są obsługiwane przez wątek w procesie opiekuna.
+         */
         sem_lock();
         for (int i = 0; i < pcount && i < MAX_BUS_CAPACITY; i++) {
             pid_t passenger_pid = plist[i];
-            
-            if (passenger_pid < 0) {
-                continue; /* dziecko – pomijamy, opiekun je powiadomi */
-            }
-            
-            if (passenger_pid > 0 && passenger_pid < MAX_PID) {
+            if (passenger_pid < 0) continue;   /* pomijamy wpisy dzieci */
+            if (passenger_pid > 0 && passenger_pid < MAX_PID)
                 bus->passenger_trip_completed[passenger_pid] = 1;
-            }
         }
         sem_unlock();
-        
-        /* Podnosimy sem[6] po jednym razie dla każdego dorosłego pasażera.
-         * Bez SEM_UNDO – celowo: jeśli kierowca padnie po tym punkcie,
-         * tokeny pozostają w semaforze i pasażerowie mogą się wybudzić. */
+
+        /* Podniesienie semafora sem[5] po jednym tokenie na pasażera.
+         * Bez SEM_UNDO – token musi pozostać do skonsumowania przez pasażera. */
         for (int i = 0; i < pcount && i < MAX_BUS_CAPACITY; i++) {
             pid_t passenger_pid = plist[i];
-            
-            if (passenger_pid < 0) {
-                continue;
-            }
-            
-            struct sembuf sb = { 6, 1, 0 };
-            if (semop(semid, &sb, 1) == -1) {
-                if (errno == EIDRM || errno == EINVAL) {
-                    break; /* semafory usunięte – system się kończy */
-                }
+            if (passenger_pid < 0) continue;
+
+            struct sembuf sb_post = { 5, 1, 0 };
+            if (semop(semid, &sb_post, 1) == -1) {
+                if (errno == EIDRM || errno == EINVAL) break;  /* IPC usunięte */
             }
         }
 
+        /* Sprawdzenie flag po powrocie do stacji */
         sem_lock();
         sd = bus->shutdown;
         sb = bus->station_blocked;

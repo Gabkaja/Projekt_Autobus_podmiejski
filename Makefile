@@ -1,27 +1,38 @@
-# Makefile - Symulacja dworca autobusowego
+# Makefile – Symulacja dworca autobusowego
 #
-# -D_POSIX_C_SOURCE=200809L  włącza usleep(), nanosleep(), strftime() itp.
-#                             bez ostrzeżeń o niejawnych deklaracjach
-# -Wall -Wextra               wszystkie ostrzeżenia
-# -pedantic                   zgodność ze standardem
-# -g                          symbole debugowania (usuń dla release)
+# Projekt składa się z sześciu osobnych plików wykonywalnych:
+#   main               – proces nadrzędny, tworzy zasoby IPC i uruchamia pozostałe procesy
+#   driver             – proces kierowcy autobusu (instancjonowany N razy)
+#   passenger          – proces pasażera (instancjonowany dynamicznie przez generator)
+#   cashier            – proces kasjera obsługującego kolejkę rejestracji
+#   dispatcher         – proces dyspozytora reagującego na sygnały zewnętrzne
+#   passenger_generator – proces generatora tworzącego pasażerów
+#
+# Flagi kompilacji:
+#   -D_POSIX_C_SOURCE=200809L  Udostępnia interfejsy POSIX.1-2008 (m.in. strftime,
+#                              sigaction, sem_t) bez ostrzeżeń o niejawnych deklaracjach.
+#   -Wall -Wextra              Włącza pełny zestaw ostrzeżeń kompilatora.
+#   -pedantic                  Wymusza zgodność z wybranym standardem języka C.
+#   -g                         Generuje symbole debugowania (usunąć przy kompilacji produkcyjnej).
 
 CC      = gcc
 CFLAGS  = -Wall -Wextra -pedantic -g -D_POSIX_C_SOURCE=200809L
 LDFLAGS =
 
-# Pliki wykonywalne
+# Lista wszystkich plików wykonywalnych projektu
 TARGETS = main driver passenger cashier dispatcher passenger_generator
 
-# Wspólny nagłówek
+# Wspólny nagłówek definiujący struktury i stałe IPC
 DEPS = ipc.h
 
-.PHONY: all clean run logs
+.PHONY: all clean run logs clean-ipc
 
+# Domyślna reguła: kompilacja wszystkich plików wykonywalnych
 all: $(TARGETS)
 
-# Każdy plik .c kompiluje się do osobnego pliku wykonywalnego
-# (każdy to oddzielny process exec-owany przez main/generator)
+# Każdy moduł jest kompilowany jako osobny plik wykonywalny.
+# main uruchamia driver, cashier, dispatcher i passenger_generator przez execl().
+# passenger_generator uruchamia passenger przez execl().
 
 main: main.c $(DEPS)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
@@ -29,6 +40,7 @@ main: main.c $(DEPS)
 driver: driver.c $(DEPS)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
+# passenger wymaga biblioteki pthreads ze względu na wątek dziecka (child_thread)
 passenger: passenger.c $(DEPS)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) -lpthread
 
@@ -41,21 +53,23 @@ dispatcher: dispatcher.c $(DEPS)
 passenger_generator: passenger_generator.c $(DEPS)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-# Uruchomienie z domyślnymi parametrami: 2 autobusy, 10 miejsc, 3 rowery, 5s postój
+# Uruchomienie symulacji z domyślnymi parametrami:
+#   N=2 autobusy, P=10 miejsc pasażerskich, R=3 miejsca rowerowe, T=5s postój na dworcu
 run: all
 	./main 2 10 3 5
 
-# Podgląd logów
+# Wyświetlenie ostatnich wpisów z dzienników symulacji
 logs:
 	@echo "=== report.txt ===" && tail -50 report.txt 2>/dev/null || true
 	@echo "=== driver.log ===" && tail -20 driver.log 2>/dev/null || true
 	@echo "=== passenger.log ===" && tail -20 passenger.log 2>/dev/null || true
 
-# Czyszczenie plików binarnych i logów
+# Usunięcie plików wykonywalnych, dzienników i plików kluczy IPC
 clean:
 	rm -f $(TARGETS) *.log report.txt bus_shm.key bus_sem.key bus_msg.key bus_msg_reply.key
 
-# Czyszczenie IPC po awarii (jeśli program nie posprzątał)
+# Awaryjne czyszczenie zasobów IPC pozostałych po nieprawidłowym zakończeniu programu.
+# Przydatne gdy main nie zdążył wywołać cleanup() przed przerwaniem procesu.
 clean-ipc:
 	@echo "Czyszczenie zasobów IPC..."
 	@ipcs -m | awk '/^0x/ {print $$2}' | xargs -r ipcrm -m 2>/dev/null || true

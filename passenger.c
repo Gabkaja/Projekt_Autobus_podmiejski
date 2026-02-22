@@ -1,31 +1,34 @@
 /*
- * passenger.c – proces pasażera
+ * passenger.c – Proces pasażera.
  *
- * Każdy pasażer to osobny proces tworzony przez passenger_generator przez fork+exec.
- * Po starcie pasażer losuje swój wiek i typ, następnie przechodzi przez kolejne etapy:
- * sprawdzenie czy dworzec jest otwarty, ewentualna wizyta w kasie, wsiadanie do autobusu
- * i oczekiwanie na powrót z trasy.
+ * Każdy pasażer jest osobnym procesem, tworzonym przez passenger_generator.
+ * Po uruchomieniu pasażer losuje wiek i typ, a następnie przechodzi przez
+ * kolejne etapy symulacji.
  *
- * Wiek: 1–80 lat. Pasażer poniżej 8 lat bez opiekuna jest odrzucany natychmiast.
+ * Etapy życia pasażera:
+ *   1. Sprawdzenie, czy dworzec jest otwarty (flagi shutdown/station_blocked).
+ *   2. Losowanie wieku (1–80 lat) i typu:
+ *        - VIP       ( 1%) – omija kasę i wchodzi bezpośrednio do autobusu.
+ *        - Opiekun   (24%) – rejestruje się w kasie i rezerwuje 2 miejsca;
+ *                            dziecko jest reprezentowane przez wewnętrzny wątek.
+ *        - Rowerzysta(25%) – rejestruje się w kasie; do autobusu wchodzi
+ *                            przez bramkę sem[2] (rowerową).
+ *        - Zwykły    (50%) – rejestruje się w kasie; bramka sem[1].
+ *        - Dziecko    (<8 lat bez opiekuna) – odrzucany natychmiast.
+ *   3. Rejestracja w kasie: wysłanie MSG_REGISTER i oczekiwanie na bilet.
+ *   4. Wsiadanie do autobusu: blokowanie na odpowiedniej bramce (sem[1] lub sem[2]),
+ *      sprawdzenie dostępności miejsca pod mutexem sem[0], rezerwacja miejsca.
+ *   5. Oczekiwanie na powrót autobusu: semop(sem[5], -1) + flaga passenger_trip_completed.
+ *   6. Zakończenie.
  *
- * Typy (dla wieku >= 8):
- *   VIP              ( 1%) – omija kasę, wsiada bezpośrednio
- *   Opiekun+dziecko  (24%) – idzie do kasy, rezerwuje 2 miejsca;
- *                            dziecko modelowane jest jako wątek pthread wewnątrz tego procesu
- *   Z rowerem        (25%) – idzie do kasy, potrzebuje miejsca na rower (wchodzi przez bramkę sem[2])
- *   Zwykły           (50%) – idzie do kasy, wchodzi przez bramkę sem[1]
+ * Wątek dziecka (child_thread):
+ *   Tworzony wewnątrz procesu opiekuna przez pthread_create.
+ *   Czeka na sygnał ctx.boarded (opiekun wsiadł), następnie na ctx.trip_done (autobus wrócił).
+ *   Nie korzysta z IPC bezpośrednio – koordynacja przez pthread_mutex i pthread_cond.
  *
- * Semafory IPC:
- *   sem[0]  – mutex ogólny chroniący shared memory
- *   sem[1]  – bramka dla pasażerów bez roweru
- *   sem[2]  – bramka dla pasażerów z rowerem
- *   sem[6]  – sygnał powrotu autobusu; kierowca postuje +1 raz na każdego dorosłego pasażera
- *
- * Synchronizacja wewnętrzna opiekun ↔ wątek dziecka odbywa się przez:
- *   ChildCtx.mtx  – pthread_mutex
- *   ChildCtx.cond – pthread_cond
- *   ChildCtx.boarded   – flaga: opiekun wsiadł → budzi wątek dziecka po raz pierwszy
- *   ChildCtx.trip_done – flaga: autobus wrócił → budzi wątek dziecka po raz drugi
+ * Kolejność blokowania semaforów (zapobieganie zakleszczeniom):
+ *   Zawsze: bramka (sem[1] lub sem[2]) PRZED mutexem (sem[0]).
+ *   Musi być spójna z kolejnością w driver.c: sem[1] → sem[2] → sem[0].
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -45,22 +48,28 @@
 #include <signal.h>
 #include "ipc.h"
 
-/* Globalne zasoby IPC – dostępne zarówno w wątku głównym (opiekuna) jak i w wątku dziecka. */
-static int            shmid, semid, msgid, msgid_reply;
+/* Globalne zasoby IPC – dostępne zarówno w wątku głównym, jak i w wątku dziecka */
+static int             shmid, semid, msgid, msgid_reply;
 static struct BusState *bus;
 
-/* Kontekst współdzielony między wątkiem opiekuna a wątkiem dziecka.
- * Wątek dziecka czeka na dwa kolejne sygnały: wsiadanie i powrót autobusu.
- * Opiekun ustawia odpowiednie flagi i rozgłasza przez pthread_cond_broadcast. */
+/* =========================================================
+ * Kontekst współdzielony między wątkiem opiekuna a wątkiem dziecka.
+ * Synchronizacja przez pthread_mutex + pthread_cond, gdyż wątki
+ * należą do tego samego procesu i nie mogą używać semaforów IPC
+ * bez ryzyka zakłócenia globalnych liczników.
+ * ========================================================= */
 typedef struct {
     pthread_mutex_t mtx;
     pthread_cond_t  cond;
-    int      boarded;       /* 1 gdy opiekun (i dziecko) wsiedli do autobusu */
-    int      trip_done;     /* 1 gdy autobus wrócił z trasy */
-    pid_t    guardian_pid;  /* PID opiekuna – używany tylko do logowania */
+    int      boarded;       /* Flaga: opiekun wsiadł do autobusu (budzi wątek dziecka po raz pierwszy)  */
+    int      trip_done;     /* Flaga: autobus wrócił z trasy (budzi wątek dziecka po raz drugi)         */
+    pid_t    guardian_pid;  /* PID opiekuna – używany wyłącznie do logowania                            */
 } ChildCtx;
 
-/* Formatuje aktualny czas jako HH:MM:SS. */
+/* =========================================================
+ * Funkcje pomocnicze: timestamp i logowanie
+ * ========================================================= */
+
 static void ts(char *buf, size_t n)
 {
     time_t t = time(NULL);
@@ -69,7 +78,6 @@ static void ts(char *buf, size_t n)
     strftime(buf, n, "%H:%M:%S", ti);
 }
 
-/* Dopisuje do prywatnego logu pasażerów. */
 static void log_write(const char *s)
 {
     int fd = open("passenger.log", O_CREAT | O_WRONLY | O_APPEND, 0600);
@@ -78,7 +86,6 @@ static void log_write(const char *s)
     close(fd);
 }
 
-/* Dopisuje do wspólnego raportu symulacji. */
 static void log_main(const char *s)
 {
     int fd = open("report.txt", O_CREAT | O_WRONLY | O_APPEND, 0600);
@@ -87,8 +94,10 @@ static void log_main(const char *s)
     close(fd);
 }
 
-/* Blokujące P(sem[0]) – zajmuje mutex ogólny.
- * Ignoruje EINTR (przerwanie przez sygnał) i ponawia próbę. */
+/* =========================================================
+ * Operacje na semaforze mutex (sem[0])
+ * ========================================================= */
+
 static void sem_lock(void)
 {
     struct sembuf sb = {0, -1, SEM_UNDO};
@@ -96,27 +105,27 @@ static void sem_lock(void)
         ;
 }
 
-/* V(sem[0]) – zwalnia mutex ogólny. */
 static void sem_unlock(void)
 {
     struct sembuf sb = {0, 1, SEM_UNDO};
     semop(semid, &sb, 1);
 }
 
-/* Funkcja wątku dziecka – modeluje zachowanie dziecka jadącego z opiekunem.
+/* =========================================================
+ * Wątek dziecka
  *
- * Wątek czeka kolejno na dwa sygnały przez pthread_cond_wait:
- *  1. ctx->boarded == 1 – opiekun wsiadł, dziecko loguje "wsiadłem razem z opiekunem"
- *  2. ctx->trip_done == 1 – autobus wrócił, dziecko loguje "wróciłem" i kończy
- *
- * Użycie pthread zamiast osobnego procesu pozwala dziecku współdzielić
- * zasoby IPC i kontekst opiekuna bez dodatkowego fork+exec. */
+ * Cykl życia:
+ *   1. Oczekiwanie na ctx->boarded – opiekun wsiadł, dziecko wsiadło razem z nim.
+ *   2. Logowanie faktu wsiadania.
+ *   3. Oczekiwanie na ctx->trip_done – autobus wrócił z trasy.
+ *   4. Logowanie powrotu i zakończenie wątku.
+ * ========================================================= */
 static void *child_thread(void *arg)
 {
     ChildCtx *ctx = (ChildCtx *)arg;
     char b[64], ln[256];
 
-    /* Czekamy na sygnał wsiadania od opiekuna. */
+    /* Oczekiwanie na wsiadanie opiekuna */
     pthread_mutex_lock(&ctx->mtx);
     while (!ctx->boarded)
         pthread_cond_wait(&ctx->cond, &ctx->mtx);
@@ -129,7 +138,7 @@ static void *child_thread(void *arg)
     log_write(ln);
     log_main(ln);
 
-    /* Czekamy na sygnał powrotu autobusu od opiekuna. */
+    /* Oczekiwanie na powrót autobusu z trasy */
     pthread_mutex_lock(&ctx->mtx);
     while (!ctx->trip_done)
         pthread_cond_wait(&ctx->cond, &ctx->mtx);
@@ -145,47 +154,59 @@ static void *child_thread(void *arg)
     return NULL;
 }
 
-/* Blokujące P(sem[gate]) – zajmuje bramkę wsiadania.
- * Zwraca 0 przy sukcesie, -1 gdy IPC zostało usunięte (czas kończyć). */
+/* =========================================================
+ * Operacje na bramkach pasażerskich
+ *
+ * sem[1] – bramka dla pasażerów bez roweru.
+ * sem[2] – bramka dla pasażerów z rowerem.
+ *
+ * Wzięcie bramki serializuje wejście pasażerów danego rodzaju do autobusu.
+ * Kolejność: najpierw bramka, dopiero potem mutex ogólny (sem[0]).
+ * Odwrócenie kolejności mogłoby spowodować zakleszczenie z driver.c,
+ * który blokuje bramki pod swoim mutexem przy zamykaniu drzwi.
+ * ========================================================= */
 static int gate_lock(int g)
 {
     struct sembuf sb = {(unsigned short)g, -1, SEM_UNDO};
     while (semop(semid, &sb, 1) == -1) {
-        if (errno == EINTR)  continue;
-        if (errno == EIDRM || errno == EINVAL) return -1;
+        if (errno == EINTR)              continue;
+        if (errno == EIDRM || errno == EINVAL) return -1;  /* IPC usunięte */
         return -1;
     }
     return 0;
 }
 
-/* V(sem[gate]) – zwalnia bramkę wsiadania. */
 static void gate_unlock(int g)
 {
     struct sembuf sb = {(unsigned short)g, 1, SEM_UNDO};
     semop(semid, &sb, 1);
 }
 
-/* Czeka na powrót autobusu z trasy (blokuje wątek główny / opiekuna).
+/* =========================================================
+ * Oczekiwanie na powrót autobusu
  *
- * Mechanizm oparty na kombinacji tablicy flag i semafora sem[6]:
- *  - Kierowca po powrocie ustawia passenger_trip_completed[pid] = 1
- *    i podnosi sem[6] o 1 dla każdego dorosłego pasażera.
- *  - Pasażer najpierw konsumuje token z sem[6] przez semop(-1),
- *    dopiero potem sprawdza czy flaga należy do niego.
- *  - Jeśli token był czyjś (race condition przy wielu pasażerach) –
- *    oddaje token z powrotem i czeka kolejną sekundę.
+ * Protokół:
+ *   1. Konsumuj jeden token z sem[5] (semop -1).
+ *   2. Sprawdź, czy flaga passenger_trip_completed[my_pid] jest ustawiona.
+ *   3. Jeśli tak – wyzeruj flagę i wyjdź.
+ *   4. Jeśli nie – oddaj token (semop +1) i poczekaj sekundę, następnie wróć do kroku 1.
  *
- * Ta kolejność (consume → check, nie check → consume) zapobiega sytuacji
- * gdzie pasażer przeoczyłby swój token bo inny pasażer go skonsumował. */
+ * Kierowca po powrocie:
+ *   a. Ustawia passenger_trip_completed[pid] = 1 pod mutexem.
+ *   b. Podnosi sem[5] dla każdego dorosłego pasażera.
+ *
+ * Pasażer zawsze najpierw konsumuje token, dopiero potem sprawdza flagę,
+ * co eliminuje wyścig między sprawdzeniem flagi a podniesieniem semafora.
+ * ========================================================= */
 static void wait_for_trip_end(pid_t my_pid)
 {
     char b[64], ln[256];
 
     for (;;) {
-        struct sembuf sb_wait = {6, -1, 0};
+        struct sembuf sb_wait = {5, -1, 0};
         if (semop(semid, &sb_wait, 1) == -1) {
             if (errno == EINTR) continue;
-            /* EIDRM / EINVAL – zasoby IPC usunięte przez cleanup(), wychodzimy. */
+            /* Usunięcie IPC (EIDRM/EINVAL) – system jest zamykany, kończymy oczekiwanie */
             ts(b, sizeof(b));
             snprintf(ln, sizeof(ln),
                      "[%s] [PASAZER %d] IPC usuniete podczas czekania - koniec\n",
@@ -194,30 +215,32 @@ static void wait_for_trip_end(pid_t my_pid)
             return;
         }
 
-        /* Sprawdź czy pobrany token należy do nas. */
+        /* Weryfikacja, czy odebrany token należy do tego pasażera */
         if (my_pid > 0 && my_pid < MAX_PID
             && bus->passenger_trip_completed[my_pid]) {
-            bus->passenger_trip_completed[my_pid] = 0; /* skasuj flagę */
-            return; /* nasz token – podróż zakończona */
+            bus->passenger_trip_completed[my_pid] = 0;
+            return;
         }
 
-        /* Nie nasz token – oddajemy go i czekamy dalej. */
-        struct sembuf sb_ret = {6, 1, 0};
+        /* Token nie był przeznaczony dla tego pasażera – oddaj go i zaczekaj */
+        struct sembuf sb_ret = {5, 1, 0};
         semop(semid, &sb_ret, 1);
         sleep(1);
     }
 }
 
+/* =========================================================
+ * Funkcja główna pasażera
+ * ========================================================= */
 int main(void)
 {
     char b[64], ln[512];
 
-    /* Łączymy się z istniejącymi zasobami IPC (bez IPC_CREAT).
-     * nsems=0 w semget oznacza "nie twórz, przyłącz do istniejącego". */
-    key_t shm_key     = ftok(SHM_PATH,       'S');
-    key_t sem_key     = ftok(SEM_PATH,        'E');
-    key_t msg_key     = ftok(MSG_PATH,        'M');
-    key_t msg_rpl_key = ftok(MSG_REPLY_PATH,  'R');
+    /* Podłączenie do istniejących zasobów IPC */
+    key_t shm_key     = ftok(SHM_PATH,      'S');
+    key_t sem_key     = ftok(SEM_PATH,       'E');
+    key_t msg_key     = ftok(MSG_PATH,       'M');
+    key_t msg_rpl_key = ftok(MSG_REPLY_PATH, 'R');
 
     if (shm_key == -1 || sem_key == -1 || msg_key == -1 || msg_rpl_key == -1) {
         perror("ftok passenger");
@@ -225,7 +248,7 @@ int main(void)
     }
 
     shmid       = shmget(shm_key,  sizeof(struct BusState), 0600);
-    semid       = semget(sem_key,  0, 0600);
+    semid       = semget(sem_key,  0, 0600);   /* nsems=0: podłącz do istniejącego zestawu */
     msgid       = msgget(msg_key,  0600);
     msgid_reply = msgget(msg_rpl_key, 0600);
 
@@ -238,11 +261,10 @@ int main(void)
     if (bus == (void *)-1) { perror("shmat passenger"); return 1; }
 
     pid_t my_pid = getpid();
-    /* XOR pid z czasem daje unikalne ziarno dla każdego procesu. */
     srand((unsigned)(my_pid ^ (unsigned)time(NULL)));
     ts(b, sizeof(b));
 
-    /* ===== Krok 1: Sprawdź czy dworzec jest otwarty ===== */
+    /* ===== Etap 1: Sprawdzenie dostępności dworca ===== */
     sem_lock();
     int sd       = bus->shutdown;
     int sblocked = bus->station_blocked;
@@ -257,16 +279,16 @@ int main(void)
         return 0;
     }
 
-    /* ===== Krok 2: Losuj wiek i typ pasażera =====
+    /* ===== Etap 2: Losowanie wieku i typu pasażera =====
      *
-     * Wiek: 1–80 lat (jednostajny rozkład).
+     * Wiek: rozkład jednostajny 1–80 lat.
      * Pasażer poniżej 8 lat = dziecko bez opiekuna → odrzucany natychmiast.
      *
-     * Dla pozostałych (wiek >= 8), r = rand() % 100 wyznacza typ:
-     *   r == 0       → VIP        ( 1%)
-     *   r w 1–24     → opiekun    (24%)
-     *   r w 25–49    → rowerzysta (25%)
-     *   r w 50–99    → zwykły     (50%)
+     * Dla pasażerów w wieku >= 8 lat:
+     *   r % 100 == 0         → VIP       ( 1%)
+     *   r % 100 w [1..24]    → Opiekun   (24%)
+     *   r % 100 w [25..49]   → Rowerzysta(25%)
+     *   r % 100 w [50..99]   → Zwykły    (50%)
      */
     int age           = 1 + rand() % 80;
     int is_lone_child = (age < 8);
@@ -288,7 +310,7 @@ int main(void)
              b, (int)my_pid, age, is_vip, is_lone_child, has_bike, is_guardian);
     log_write(ln);
 
-    /* ===== Krok 3: Zaktualizuj liczniki typów w shared memory ===== */
+    /* ===== Etap 3: Aktualizacja liczników typów pasażerów ===== */
     sem_lock();
     if (is_vip) {
         bus->total_vip++;
@@ -298,7 +320,7 @@ int main(void)
     }
     sem_unlock();
 
-    /* ===== Krok 4: Dziecko bez opiekuna – odrzucamy od razu ===== */
+    /* ===== Etap 4: Odrzucenie dziecka bez opiekuna ===== */
     if (is_lone_child) {
         sem_lock(); bus->total_children_without_guardian++; sem_unlock();
         ts(b, sizeof(b));
@@ -311,11 +333,7 @@ int main(void)
         return 0;
     }
 
-    /* ===== Krok 5: Opiekun – uruchom wątek dziecka =====
-     *
-     * Wątek startuje od razu ale czeka na ctx.boarded == 1 zanim cokolwiek zaloguje.
-     * Jeśli pthread_create się nie uda, degradujemy opiekuna do zwykłego pasażera
-     * (is_guardian = 0) – traci jedno miejsce, ale nie zawiesza systemu. */
+    /* ===== Etap 5: Uruchomienie wątku dziecka (tylko dla opiekuna) ===== */
     pthread_t child_tid = 0;
     ChildCtx  ctx;
     if (is_guardian) {
@@ -327,7 +345,8 @@ int main(void)
 
         if (pthread_create(&child_tid, NULL, child_thread, &ctx) != 0) {
             perror("pthread_create child");
-            is_guardian = 0; /* degradacja – kontynuujemy jako zwykły pasażer */
+            /* Nie udało się stworzyć wątku – pasażer kontynuuje jako zwykły */
+            is_guardian = 0;
         } else {
             ts(b, sizeof(b));
             snprintf(ln, sizeof(ln),
@@ -337,24 +356,19 @@ int main(void)
         }
     }
 
-    /* ===== Krok 6: Kasa (tylko nie-VIP) =====
-     *
-     * Pasażer wysyła MSG_REGISTER do kolejki żądań i blokuje się czekając
-     * na bilet w kolejce odpowiedzi (typ = MSG_TICKET_BASE + własny pid).
-     * VIP-owie ten krok całkowicie pomijają. */
+    /* ===== Etap 6: Rejestracja w kasie (tylko pasażerowie nie-VIP) ===== */
     if (!is_vip) {
         sem_lock();
         sd       = bus->shutdown;
         sblocked = bus->station_blocked;
         if (sd || sblocked) {
-            /* Dworzec zamknął się gdy pasażer był w drodze do kasy. */
             bus->total_station_blocked++;
             sem_unlock();
             snprintf(ln, sizeof(ln),
                      "[%s] [PASAZER %d] Dworzec zamkniety przed kasa - odchodzi\n",
                      b, (int)my_pid);
             log_write(ln);
-            /* Zanim wyjdziemy, musimy bezpiecznie zakończyć wątek dziecka. */
+            /* Wątek dziecka musi zostać zakończony przed zwolnieniem zasobów */
             if (is_guardian && child_tid) {
                 pthread_mutex_lock(&ctx.mtx);
                 ctx.boarded = 1;
@@ -371,7 +385,7 @@ int main(void)
         bus->total_sent_to_cashier++;
         sem_unlock();
 
-        /* Wysyłamy żądanie rejestracji do kasjera. */
+        /* Wysłanie żądania rejestracji do kasjera */
         struct msg m;
         memset(&m, 0, sizeof(m));
         m.type  = MSG_REGISTER;
@@ -401,8 +415,9 @@ int main(void)
             return 0;
         }
 
-        /* Czekamy na bilet z kolejki odpowiedzi. Typ wiadomości = MSG_TICKET_BASE + pid
-         * gwarantuje że odbierzemy tylko swój bilet, a nie cudzej odpowiedzi. */
+        /* Oczekiwanie na bilet z kolejki odpowiedzi.
+         * Typ wiadomości = MSG_TICKET_REPLY + my_pid, co gwarantuje,
+         * że pasażer odbierze wyłącznie własny bilet. */
         long   reply_type = MSG_TICKET_REPLY + (long)my_pid;
         ssize_t rcv;
         do {
@@ -441,28 +456,27 @@ int main(void)
         log_write(ln);
     }
 
-    /* ===== Krok 7: Wsiadanie do autobusu =====
+    /* ===== Etap 7: Wsiadanie do autobusu =====
      *
-     * Pasażer wchodzi przez właściwą bramkę:
-     *   sem[1] – pasażerowie bez roweru
-     *   sem[2] – pasażerowie z rowerem
+     * Pasażer wchodzi przez właściwą bramkę (sem[1] lub sem[2]),
+     * następnie pod mutexem sem[0] sprawdza dostępność miejsca.
      *
-     * Protokół wsiadania (kolejność blokowania MUSI być spójna z driver.c):
-     *   1. Weź bramkę (sem[1] lub sem[2])
-     *   2. Pod bramką weź mutex (sem[0]) i sprawdź dostępność miejsc
-     *   3. Jeśli miejsce jest – zarezerwuj atomowo i wsiądź
-     *   4. Zwolnij mutex, zwolnij bramkę
-     *   5. Jeśli miejsca brak lub autobus odjeżdża – zwolnij mutex i bramkę, poczekaj 1s i wróć do 1
+     * Protokół (kolejność blokowania spójna z driver.c):
+     *   1. Weź bramkę (sem[1] lub sem[2]).
+     *   2. Weź mutex (sem[0]) i sprawdź: autobus obecny, nie odjeżdża, jest miejsce.
+     *   3a. Miejsce dostępne: zarezerwuj, zwolnij mutex i bramkę, potwierdź wejście.
+     *   3b. Brak miejsca lub brak autobusu: zwolnij mutex i bramkę, odczekaj 1 sekundę.
      *
-     * Opiekun rezerwuje 2 miejsca naraz pod mutexem (on + dziecko).
-     * Dziecko nie przechodzi przez bramkę samodzielnie – wchodzi logicznie razem
-     * z opiekunem i jest powiadamiane przez ctx.boarded. */
+     * Opiekun rezerwuje 2 miejsca atomowo pod mutexem.
+     * Dziecko nie przechodzi przez bramkę samodzielnie – jest wpisywane na listę
+     * z ujemnym PID-em przez opiekuna i powiadamiane przez ctx.boarded.
+     */
     int boarded = 0;
-    int needed  = is_guardian ? 2 : 1;
-    int gate    = has_bike ? 2 : 1;
+    int needed  = is_guardian ? 2 : 1;   /* Opiekun potrzebuje miejsca dla siebie i dziecka */
+    int gate    = has_bike ? 2 : 1;      /* Rowerzysta używa bramki rowerzystów             */
 
     while (!boarded) {
-        /* Szybkie sprawdzenie shutdown bez zajmowania bramki. */
+        /* Szybkie sprawdzenie flag przed blokowaniem na bramce */
         sem_lock();
         sd       = bus->shutdown;
         sblocked = bus->station_blocked;
@@ -470,10 +484,10 @@ int main(void)
 
         if (sd || sblocked) break;
 
-        /* Zajmujemy bramkę – serializuje wejście pasażerów tego samego typu. */
+        /* Wzięcie bramki – serializuje dostęp pasażerów danego typu */
         if (gate_lock(gate) == -1) break;
 
-        /* Pod bramką zajmujemy mutex i sprawdzamy stan autobusu. */
+        /* Pod bramką: wzięcie mutexu i weryfikacja stanu autobusu */
         sem_lock();
         sd       = bus->shutdown;
         sblocked = bus->station_blocked;
@@ -490,14 +504,13 @@ int main(void)
             int list_ok    = (bus->passenger_count + needed) <= MAX_BUS_CAPACITY;
 
             if (free_seats >= needed && bike_ok && list_ok) {
-                /* Rezerwujemy miejsca – atomowo pod mutexem. */
+                /* Atomowa rezerwacja miejsca i wpisanie na listę pasażerów */
                 bus->passengers += needed;
                 if (has_bike) bus->bikes++;
 
-                /* Dorosły pasażer zapisywany z dodatnim PID, dziecko z ujemnym.
-                 * Kierowca rozróżnia je przy logowaniu i powiadamianiu po kursie. */
                 bus->passenger_list[bus->passenger_count++] = my_pid;
                 if (is_guardian) {
+                    /* Dziecko wpisujemy z ujemnym PID-em opiekuna jako identyfikator */
                     bus->passenger_list[bus->passenger_count++] = -my_pid;
                     bus->total_children_with_guardian++;
                 }
@@ -515,7 +528,7 @@ int main(void)
                 sem_unlock();
                 gate_unlock(gate);
 
-                /* Powiadamiamy wątek dziecka że oboje wsiedli. */
+                /* Powiadomienie wątku dziecka – opiekun wsiadł, dziecko wsiadło razem */
                 if (is_guardian && child_tid) {
                     pthread_mutex_lock(&ctx.mtx);
                     ctx.boarded = 1;
@@ -523,25 +536,25 @@ int main(void)
                     pthread_mutex_unlock(&ctx.mtx);
                 }
             } else {
-                /* Brak miejsca – zwalniamy bramkę i czekamy sekundę. */
+                /* Brak miejsca – zwolnij blokady i zaczekaj na zwolnienie miejsca */
                 sem_unlock();
                 gate_unlock(gate);
                 sleep(1);
             }
         } else {
-            /* Brak autobusu na dworcu lub autobus właśnie odjeżdża – czekamy. */
+            /* Brak autobusu na dworcu lub autobus właśnie odjeżdża – zaczekaj */
             sem_unlock();
             gate_unlock(gate);
             sleep(1);
         }
     }
 
+    /* Pasażer nie zdołał wsiąść – shutdown lub blokada podczas oczekiwania */
     if (!boarded) {
         ts(b, sizeof(b));
         snprintf(ln, sizeof(ln),
                  "[%s] [PASAZER %d] Nie wsiadt – shutdown/blokada\n", b, (int)my_pid);
         log_write(ln);
-        /* Wątek dziecka musi zostać zakończony zanim zwolnimy zasoby. */
         if (is_guardian && child_tid) {
             pthread_mutex_lock(&ctx.mtx);
             ctx.boarded = 1; ctx.trip_done = 1;
@@ -555,11 +568,7 @@ int main(void)
         return 0;
     }
 
-    /* ===== Krok 8: Czekanie na powrót autobusu =====
-     *
-     * Pasażer blokuje się w wait_for_trip_end() dopóki kierowca nie wróci
-     * z trasy i nie ustawi flagi passenger_trip_completed[my_pid].
-     * Szczegóły mechanizmu opisane przy definicji wait_for_trip_end(). */
+    /* ===== Etap 8: Oczekiwanie na powrót autobusu ===== */
     ts(b, sizeof(b));
     snprintf(ln, sizeof(ln),
              "[%s] [PASAZER %d] W autobusie - czeka na powrot\n", b, (int)my_pid);
@@ -567,7 +576,7 @@ int main(void)
 
     wait_for_trip_end(my_pid);
 
-    /* Informujemy wątek dziecka o powrocie autobusu. */
+    /* Powiadomienie wątku dziecka, że kurs dobiegł końca */
     if (is_guardian && child_tid) {
         pthread_mutex_lock(&ctx.mtx);
         ctx.trip_done = 1;
@@ -581,8 +590,7 @@ int main(void)
     log_write(ln);
     log_main(ln);
 
-    /* Czekamy na zakończenie wątku dziecka zanim zwolnimy ChildCtx –
-     * inaczej wątek mógłby pisać do już zwolnionej pamięci stosu. */
+    /* Czekamy na zakończenie wątku dziecka przed zwolnieniem zasobów procesu */
     if (is_guardian && child_tid) {
         pthread_join(child_tid, NULL);
         pthread_mutex_destroy(&ctx.mtx);
