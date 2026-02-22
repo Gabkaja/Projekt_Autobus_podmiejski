@@ -10,8 +10,12 @@
 
 int shmid;
 struct BusState* bus;
+
+/* Flaga ustawiana przez handlery sygnałów – pętla główna sprawdza ją
+ * po każdym pause() i decyduje czy zakończyć pracę. */
 volatile sig_atomic_t should_exit = 0;
 
+/* Formatuje aktualny czas jako HH:MM:SS. */
 void ts(char* buf, size_t n) {
     time_t t = time(NULL);
     struct tm* tm_info = localtime(&t);
@@ -22,6 +26,7 @@ void ts(char* buf, size_t n) {
     strftime(buf, n, "%H:%M:%S", tm_info);
 }
 
+/* Dopisuje do prywatnego logu dyspozytora. */
 void log_write(const char* s) {
     int fd = open("dispatcher.log", O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd == -1) return;
@@ -29,6 +34,7 @@ void log_write(const char* s) {
     close(fd);
 }
 
+/* Dopisuje do wspólnego raportu symulacji. */
 void log_main(const char* s) {
     int fd = open("report.txt", O_CREAT | O_WRONLY | O_APPEND, 0600);
     if (fd == -1) return;
@@ -36,6 +42,9 @@ void log_main(const char* s) {
     close(fd);
 }
 
+/* Obsługa SIGINT – inicjuje shutdown całego systemu.
+ * Ustawia obie flagi w shared memory i informuje o tym w logu.
+ * should_exit = 1 spowoduje że pętla pause() zakończy działanie. */
 void handle_int(int sig) {
     (void)sig;
     if (bus) {
@@ -52,6 +61,9 @@ void handle_int(int sig) {
     should_exit = 1;
 }
 
+/* Obsługa SIGUSR1 – wymuszony odjazd autobusu.
+ * Dyspozytor przekazuje sygnał dalej do aktualnego kierowcy,
+ * który po otrzymaniu SIGUSR1 natychmiast odjedzie z dworca. */
 void handle_usr1(int sig) {
     (void)sig;
     if (bus && bus->driver_pid > 0) {
@@ -65,6 +77,11 @@ void handle_usr1(int sig) {
     }
 }
 
+/* Obsługa SIGUSR2 – zablokowanie dworca.
+ * Ustawia station_blocked i shutdown w shared memory, wysyła SIGUSR2
+ * do kierowcy żeby ten wiedział że ma zakończyć pracę po bieżącym kursie,
+ * a do procesu main (getppid()) żeby ten też wiedział o blokadzie i
+ * zaczął procedurę zamykania. should_exit = 1 kończy pętlę dyspozytora. */
 void handle_usr2(int sig) {
     (void)sig;
     if (bus) {
@@ -74,7 +91,6 @@ void handle_usr2(int sig) {
             kill(bus->driver_pid, SIGUSR2);
         }
         
-        // Wysyłamy SIGUSR2 także do main (parent process)
         kill(getppid(), SIGUSR2);
         
         char b[64];
@@ -113,6 +129,8 @@ int main() {
     log_write(ln);
     log_main(ln);
 
+    /* SA_RESTART sprawia że przerwane przez sygnał wywołania systemowe
+     * wznawiają się automatycznie zamiast zwracać EINTR. */
     struct sigaction sai;
     memset(&sai, 0, sizeof(sai));
     sai.sa_handler = handle_int;
@@ -134,6 +152,9 @@ int main() {
     sa2.sa_flags = SA_RESTART;
     sigaction(SIGUSR2, &sa2, NULL);
 
+    /* Dyspozytor nie robi nic aktywnie – czeka na sygnały.
+     * pause() usypia proces do momentu nadejścia dowolnego sygnału,
+     * handler go przetwarza, po czym pętla sprawdza should_exit. */
     while (!should_exit) {
         pause();
     }
